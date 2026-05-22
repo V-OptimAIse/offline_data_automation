@@ -80,6 +80,10 @@ Use existing downloaded files without opening the portal:
 .\.venv\Scripts\python.exe src\app.py --mode rm_stock --today --skip-download
 ```
 
+Without `--skip-download`, processing runs only for source files downloaded in the
+current execution. If a portal file is unchanged, missing, or fails to download,
+that mode is skipped and no database write is attempted from an older local file.
+
 ## Logs
 
 Logs are written to both the console and rotating log files under:

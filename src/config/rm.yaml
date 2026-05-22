@@ -263,12 +263,12 @@ rm:
   sheet_config:
     COKE:                     {col_prefix: COKE_,          columns: A:J, header_row: 2, sheet_name: LAM COKE}
     DOLOMITE:                 {col_prefix: FLUX_1_,        columns: A:L, header_row: 2, sheet_name: DOLOMITE}
-    DONIMALAI OVER SIZE RTRN: {col_prefix: ORE_11_,        columns: A:R, header_row: 2, sheet_name: 'DONIMALAI OVER SIZE RTRN '}
+    DONIMALAI OVER SIZE RTRN: {col_prefix: ORE_11_,        columns: A:R, header_row: 2, sheet_name: DONIMALAI CLO OSIZE}
     GEOMIN_CLO:               {col_prefix: ORE_3_,         columns: A:S, header_row: 2, sheet_name: GEOMIN CLO}
     JRS_VENTURES:             {col_prefix: ORE_4_,         columns: A:S, header_row: 3, sheet_name: "JRS VENTURES "}
     LLOYDS_CLO:               {col_prefix: ORE_2_,         columns: A:R, header_row: 2, sheet_name: LLOYDS CLO}
     NMDC_DONOMALAI:           {col_prefix: ORE_1_,         columns: A:R, header_row: 2, sheet_name: NMDC DONOMALAI}
-    NMDC_ROM:                 {col_prefix: ORE_5_,         columns: A:Q, header_row: 2, sheet_name: NMDC ROM}
+    NMDC_ROM:                 {col_prefix: ORE_5_,         columns: A:Q, header_row: 2, sheet_name: NMDC  KIRNDUL}
     LLOYDS_OVERSIZE_CLO:      {col_prefix: ORE_6_,         columns: A:Q, header_row: 2, sheet_name: LLOYDS FINES OVER SIZE}
     BACHELI_FINES_OVERSIZE:   {col_prefix: ORE_7_,         columns: A:Q, header_row: 2, sheet_name: "BACHELI FINES OVER SIZE "}
     JAYASWAL_NECO:            {col_prefix: ORE_9_,         columns: B:R, header_row: 2, sheet_name: JAYASWAL NECO}

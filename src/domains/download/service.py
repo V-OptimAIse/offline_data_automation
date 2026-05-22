@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Set, List
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,50 @@ class DownloadConfig:
     file_station_url: str
     hourly_url: str
     portal_files: Dict[str, str]
+
+
+@dataclass(frozen=True)
+class DownloadOutcome:
+    status: str
+    paths: tuple[str, ...] = ()
+    portal_name: str | None = None
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    by_mode: Dict[str, DownloadOutcome]
+
+    @property
+    def downloaded_modes(self) -> Set[str]:
+        return {
+            mode
+            for mode, outcome in self.by_mode.items()
+            if outcome.status == "downloaded"
+        }
+
+    @property
+    def skipped_modes(self) -> Set[str]:
+        return {
+            mode
+            for mode, outcome in self.by_mode.items()
+            if outcome.status == "skipped"
+        }
+
+    @property
+    def failed_modes(self) -> Set[str]:
+        return {
+            mode
+            for mode, outcome in self.by_mode.items()
+            if outcome.status == "failed"
+        }
+
+    @property
+    def partial_modes(self) -> Set[str]:
+        return {
+            mode
+            for mode, outcome in self.by_mode.items()
+            if outcome.status == "partial"
+        }
 
 
 # -------------------------------------------------
@@ -113,7 +158,7 @@ class PortalDownloader:
         expected_name: str,
         keywords: List[str] | None = None,
         timeout: int = 240,
-    ) -> bool:
+    ) -> str | None:
         end = time.time() + timeout
         d = os.path.expanduser(self.cfg.download_dir)
 
@@ -138,11 +183,11 @@ class PortalDownloader:
                     size2 = os.path.getsize(p)
 
                     if size1 == size2:
-                        return True
+                        return str(Path(p).resolve())
 
             time.sleep(1)
 
-        return False
+        return None
 
     # -------------------------------------------------
     # GET ROWS
@@ -186,7 +231,7 @@ class PortalDownloader:
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
     # -------------------------------------------------
-    def _download_latest_file(self, url: str, keywords: List[str]) -> str:
+    def _download_latest_file(self, url: str, keywords: List[str]) -> DownloadOutcome:
         self.logger.info(f"Searching latest file using keywords: {keywords}")
 
         self.sc.driver.get(url)
@@ -212,13 +257,13 @@ class PortalDownloader:
 
         if not rows:
             self.logger.error("File list not loaded (timeout)")
-            return "failed"
+            return DownloadOutcome(status="failed")
 
         target = self._find_latest_matching_file(rows, keywords)
 
         if not target:
             self.logger.error(f"No file found for {keywords}")
-            return "failed"
+            return DownloadOutcome(status="failed")
 
         metadata = self._load_metadata()
         name = self._normalize_name(target["name"])
@@ -230,7 +275,7 @@ class PortalDownloader:
 
         if prev_modified == modified:
             self.logger.info(f"SKIPPED (no change): {name}")
-            return "skipped"
+            return DownloadOutcome(status="skipped", portal_name=target["name"])
 
         self.logger.info(f"Downloading: {target['name']}")
 
@@ -240,38 +285,43 @@ class PortalDownloader:
         )
         ActionChains(self.sc.driver).double_click(target["el"]).perform()
 
-        if not self._wait_for_download(start, name, keywords):
+        downloaded_path = self._wait_for_download(start, name, keywords)
+        if not downloaded_path:
             self.logger.error("Download failed")
-            return "failed"
+            return DownloadOutcome(status="failed", portal_name=target["name"])
 
-        files = os.listdir(os.path.expanduser(self.cfg.download_dir))
-        if not any(all(k in f.lower() for k in keywords) for f in files):
+        downloaded_name = os.path.basename(downloaded_path).lower()
+        if not all(k in downloaded_name for k in keywords):
             self.logger.error("Downloaded file mismatch")
-            return "failed"
+            return DownloadOutcome(status="failed", portal_name=target["name"])
 
         metadata["root"][name] = modified
         self._save_metadata(metadata)
 
         self.logger.info(f"Metadata updated for: {name}")
 
-        return "downloaded"
+        return DownloadOutcome(
+            status="downloaded",
+            paths=(downloaded_path,),
+            portal_name=target["name"],
+        )
 
     # -------------------------------------------------
     # RETRY WRAPPER
     # -------------------------------------------------
     def _safe_download(self, url, keywords):
         for attempt in range(3):
-            result = self._download_latest_file(url, keywords)
-            if result in ("downloaded", "skipped"):
-                return result
+            outcome = self._download_latest_file(url, keywords)
+            if outcome.status in ("downloaded", "skipped"):
+                return outcome
             self.logger.warning(f"Retry {attempt+1}/3 for {keywords}")
             time.sleep(3)
-        return "failed"
+        return DownloadOutcome(status="failed")
 
     # -------------------------------------------------
     # CHARGE
     # -------------------------------------------------
-    def _scroll_and_download_charge(self, url: str, run_dates: list) -> Set[str]:
+    def _scroll_and_download_charge(self, url: str, run_dates: list) -> DownloadOutcome:
         self.sc.driver.get(url)
         self.sc.wait.until(
             lambda d: d.execute_script("return document.readyState") == "complete"
@@ -284,25 +334,27 @@ class PortalDownloader:
             )
         except Exception:
             self.logger.error("Could not locate scroll panel.")
-            return {"charge_and_dump"}
+            return DownloadOutcome(status="failed")
 
-        candidates = set()
-        stems = []
+        pending_stems = set()
         for rd in run_dates:
             dt = datetime.strptime(rd, "%d-%b-%Y")
             for stem in (
                 f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}",
             ):
-                candidates |= { stem + ".xlsx"}
-                stems.append(stem)
+                pending_stems.add(stem)
 
-        self.logger.info(f"Looking for: {', '.join(sorted(candidates))}")
+        self.logger.info(
+            f"Looking for: {', '.join(sorted(stem + '.xlsx' for stem in pending_stems))}"
+        )
 
-        seen: Set[str] = set()
-        found = False
-        skipped: Set[str] = set()
+        downloaded_paths: list[str] = []
+        failed: Set[str] = set()
 
         for _ in range(60):
+            if not pending_stems:
+                break
+
             rows = self.sc.driver.execute_script("""
                 return [...document.querySelectorAll('.x-grid3-body .x-grid3-row')].map(r=>{
                     const t=[...r.querySelectorAll('.x-grid3-cell-inner')].map(c=>c.innerText.trim());
@@ -310,19 +362,25 @@ class PortalDownloader:
                 });
             """)
 
+            matched_on_page = False
             for r in rows:
                 name = r["n"].strip()
-                if not name or name in seen:
+                if not name:
                     continue
-                seen.add(name)
 
-                if not (
-                    name in candidates
-                    or any(
-                        name.startswith(s) and name.lower().endswith((".xlsx"))
-                        for s in stems
-                    )
-                ):
+                stem = next(
+                    (
+                        s
+                        for s in pending_stems
+                        if name == f"{s}.xlsx"
+                        or (
+                            name.startswith(s)
+                            and name.lower().endswith(".xlsx")
+                        )
+                    ),
+                    None,
+                )
+                if not stem:
                     continue
 
                 self.logger.info(f"Found charge file: {name}")
@@ -330,33 +388,59 @@ class PortalDownloader:
                     "arguments[0].scrollIntoView({block:'center'})", r["el"]
                 )
                 start = time.time()
-                ActionChains(self.sc.driver).move_to_element(r["el"]).double_click(r["el"]).perform()
+                (
+                    ActionChains(self.sc.driver)
+                    .move_to_element(r["el"])
+                    .double_click(r["el"])
+                    .perform()
+                )
 
-                if self._wait_for_download(start, name):
+                downloaded_path = self._wait_for_download(start, name)
+                if downloaded_path:
                     self.logger.info(f"Downloaded: {name}")
-                    found = True
+                    downloaded_paths.append(downloaded_path)
                 else:
                     self.logger.error(f"Download failed: {name}")
-                    skipped.add(name)
-                break
+                    failed.add(name)
 
-            if found or skipped:
-                break
+                pending_stems.remove(stem)
+                matched_on_page = True
 
-            ActionChains(self.sc.driver).move_to_element(panel).click().send_keys(Keys.PAGE_DOWN).perform()
+            if matched_on_page:
+                continue
+
+            (
+                ActionChains(self.sc.driver)
+                .move_to_element(panel)
+                .click()
+                .send_keys(Keys.PAGE_DOWN)
+                .perform()
+            )
             time.sleep(0.6)
 
-        if not found and not skipped:
-            self.logger.warning("Charge file not found after scrolling.")
-            skipped.add("charge_and_dump")
+        if pending_stems:
+            for stem in sorted(pending_stems):
+                self.logger.warning(f"Charge file not found after scrolling: {stem}.xlsx")
 
-        return skipped
+        if downloaded_paths and not failed and not pending_stems:
+            status = "downloaded"
+        elif downloaded_paths:
+            status = "partial"
+        else:
+            status = "failed"
+
+        return DownloadOutcome(status=status, paths=tuple(downloaded_paths))
 
     # -------------------------------------------------
     # MAIN ENTRY
     # -------------------------------------------------
-    def download(self, modes: list[str], run_dates: list[str], is_today_mode: bool) -> Set[str]:
-        skipped = set()
+    def download(
+        self,
+        modes: list[str],
+        run_dates: list[str],
+        is_today_mode: bool,
+    ) -> DownloadResult:
+        outcomes: Dict[str, DownloadOutcome] = {}
 
         try:
             mode_keywords = {
@@ -379,15 +463,16 @@ class PortalDownloader:
 
                 keyword_key = tuple(keywords)
                 if keyword_key in keyword_results:
-                    result = keyword_results[keyword_key]
+                    outcome = keyword_results[keyword_key]
                     self.logger.info(f"{m} uses the same portal file as an earlier mode")
                 else:
-                    result = self._safe_download(self.cfg.file_station_url, keywords)
-                    keyword_results[keyword_key] = result
+                    outcome = self._safe_download(self.cfg.file_station_url, keywords)
+                    keyword_results[keyword_key] = outcome
 
-                if result == "failed":
-                    skipped.add(m)
-                elif result == "skipped":
+                outcomes[m] = outcome
+                if outcome.status == "failed":
+                    self.logger.warning(f"{m} download failed; processing will be skipped")
+                elif outcome.status == "skipped":
                     self.logger.info(f"{m} skipped (no update)")
 
             # ---------------- CHARGE ----------------
@@ -397,11 +482,11 @@ class PortalDownloader:
                     if is_today_mode
                     else run_dates
                 )
-                skipped |= self._scroll_and_download_charge(
+                outcomes["charge"] = self._scroll_and_download_charge(
                     self.cfg.hourly_url,
                     charge_dates,
                 )
 
-            return skipped
+            return DownloadResult(by_mode=outcomes)
         finally:
             self.sc.stop()

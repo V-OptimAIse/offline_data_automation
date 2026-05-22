@@ -2,24 +2,31 @@
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
-import re
 from zoneinfo import ZoneInfo
-
-import yaml
 
 from core.config_loader import load_config
 from core.logging import configure_logging
 from infrastructure.selenium_client import SeleniumClient, SeleniumConfig
-from domains.download.service import PortalDownloader, DownloadConfig
+from domains.download.service import PortalDownloader, DownloadConfig, DownloadResult
 
 from domains.rm.service import RMService
 from domains.fines_analysis.service import FinesAnalysisService
 from domains.dpr.service import DPRService
 from domains.hot_metal.service import HotMetalService
 from domains.rm_hm.service import RMHMService
+from domains.rm_stock.service import RMStockService
 from domains.charge.service import ChargeService, ChargeServiceConfig
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+MODE_FILE_PATTERNS = {
+    "rm": ("*BUNKER*.xlsx",),
+    "fines_analysis": ("*BUNKER*.xlsx",),
+    "dpr": ("*DPR*.xlsx",),
+    "hot_metal": ("*HOT METAL*.xlsx",),
+    "rm_hm": ("*RM & HM*.xlsx",),
+    "rm_stock": ("RM BULK STOCK*",),
+    "charge": ("CHARGE_AND_DUMP_REPORT_*.xlsx",),
+}
 
 
 # -------------------------------------------------
@@ -31,7 +38,10 @@ def parse_args():
     parser.add_argument(
         "--mode",
         required=True,
-        help="Comma separated modes. Supported: rm, fines_analysis, dpr, hot_metal, rm_hm, charge",
+        help=(
+            "Comma separated modes. Supported: rm, fines_analysis, dpr, "
+            "hot_metal, rm_hm, rm_stock, charge"
+        ),
     )
 
     parser.add_argument(
@@ -93,6 +103,104 @@ def parse_run_dates(raw: str | None, today: bool) -> list[str]:
     )
 
 
+def _latest_existing_file(download_dir: Path, patterns: tuple[str, ...]) -> Path | None:
+    files = []
+    for pattern in patterns:
+        files.extend(download_dir.glob(pattern))
+
+    files = [path for path in files if path.is_file()]
+    if not files:
+        return None
+
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def _downloaded_files_for_mode(
+    mode: str,
+    download_result: DownloadResult | None,
+    logger,
+) -> list[Path]:
+    if download_result is None:
+        logger.info(f"{mode}: no download result available; skipping read/DB write")
+        return []
+
+    outcome = download_result.by_mode.get(mode)
+    if outcome is None:
+        logger.info(f"{mode}: no download attempted; skipping read/DB write")
+        return []
+
+    files = [Path(path) for path in outcome.paths]
+    existing_files = [path for path in files if path.exists()]
+    missing_files = [path for path in files if not path.exists()]
+
+    for path in missing_files:
+        logger.warning(f"{mode}: downloaded file path is missing: {path}")
+
+    if existing_files:
+        for path in existing_files:
+            logger.info(f"{mode}: processing newly downloaded file: {path}")
+        return existing_files
+
+    if outcome.status == "skipped":
+        logger.info(f"{mode}: no new portal file; skipping read/DB write")
+    elif outcome.status == "failed":
+        logger.warning(f"{mode}: download failed; skipping read/DB write")
+    else:
+        logger.info(f"{mode}: no downloaded file to process; skipping read/DB write")
+
+    return []
+
+
+def _source_file_for_mode(
+    mode: str,
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> Path | None:
+    if not skip_download:
+        files = _downloaded_files_for_mode(mode, download_result, logger)
+        return files[0] if files else None
+
+    source_file = _latest_existing_file(download_dir, MODE_FILE_PATTERNS[mode])
+    if source_file is None:
+        logger.warning(f"{mode}: no existing source file found; skipping read/DB write")
+        return None
+
+    logger.info(f"{mode}: using existing source file: {source_file}")
+    return source_file
+
+
+def _charge_file_for_date(files: list[Path], run_date: str) -> Path | None:
+    dt = datetime.strptime(run_date, "%d-%b-%Y")
+    stem = f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}"
+    matches = [path for path in files if stem in path.name]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def _charge_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> list[Path]:
+    if skip_download:
+        files = []
+        for pattern in MODE_FILE_PATTERNS["charge"]:
+            files.extend(download_dir.glob(pattern))
+        files = [path for path in files if path.is_file()]
+        if not files:
+            logger.warning(
+                "charge: no existing source files found; skipping read/DB write"
+            )
+        return files
+
+    return _downloaded_files_for_mode("charge", download_result, logger)
+
 
 # -------------------------------------------------
 # MAIN
@@ -113,7 +221,15 @@ def main():
         for m in args.mode.split(",")
         if m.strip()
     ]
-    valid_modes = {"rm", "fines_analysis", "dpr", "hot_metal", "rm_hm", "charge", "rm_stock"}
+    valid_modes = {
+        "rm",
+        "fines_analysis",
+        "dpr",
+        "hot_metal",
+        "rm_hm",
+        "charge",
+        "rm_stock",
+    }
 
     invalid = set(modes) - valid_modes
     if invalid:
@@ -132,8 +248,9 @@ def main():
     # -------------------------------------------------
     # DOWNLOAD STEP (OPTIONAL)
     # -------------------------------------------------
+    download_result: DownloadResult | None = None
     if args.skip_download:
-        logger.info(" Skipping download step (using existing files)")
+        logger.info("Skipping download step (using existing files)")
     else:
         logger.info("Starting download step")
 
@@ -161,104 +278,112 @@ def main():
                 password=cfg["eml"]["password"],
             )
 
-            skipped = downloader.download(
+            download_result = downloader.download(
                 modes=modes,
                 run_dates=run_dates,
                 is_today_mode=bool(args.today),
             )
 
-            logger.info(f"Download completed. Skipped files: {sorted(skipped)}")
+            logger.info(
+                "Download completed. "
+                f"Downloaded modes: {sorted(download_result.downloaded_modes)} | "
+                f"Partial modes: {sorted(download_result.partial_modes)} | "
+                f"Skipped modes: {sorted(download_result.skipped_modes)} | "
+                f"Failed modes: {sorted(download_result.failed_modes)}"
+            )
 
         finally:
             selenium.stop()
-
 
     # -------------------------------------------------
     # RM
     # -------------------------------------------------
     if "rm" in modes:
-        rm_files = sorted(
-            download_dir.glob("*BUNKER*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        rm_file = _source_file_for_mode(
+            "rm",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
-        if rm_files:
-            RMService(logger).process(str(rm_files[0]), cfg, run_dates)
+        if rm_file:
+            RMService(logger).process(str(rm_file), cfg, run_dates)
 
     # -------------------------------------------------
     # FINES ANALYSIS
     # -------------------------------------------------
     if "fines_analysis" in modes:
-        fines_files = sorted(
-            download_dir.glob("*BUNKER*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        fines_file = _source_file_for_mode(
+            "fines_analysis",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
-        if fines_files:
-            FinesAnalysisService(logger).process(str(fines_files[0]), cfg, run_dates)
-        else:
-            logger.warning("No BUNKER file found for fines analysis.")
+        if fines_file:
+            FinesAnalysisService(logger).process(str(fines_file), cfg, run_dates)
 
     # -------------------------------------------------
     # DPR
     # -------------------------------------------------
     if "dpr" in modes:
-        dpr_files = sorted(
-            download_dir.glob("*DPR*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        dpr_file = _source_file_for_mode(
+            "dpr",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
-        if dpr_files:
-            DPRService(logger).process(str(dpr_files[0]), cfg, run_dates)
+        if dpr_file:
+            DPRService(logger).process(str(dpr_file), cfg, run_dates)
 
     # -------------------------------------------------
     # HOT METAL
     # -------------------------------------------------
     if "hot_metal" in modes:
-        hm_files = sorted(
-            download_dir.glob("*HOT METAL*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        hm_file = _source_file_for_mode(
+            "hot_metal",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
-        if hm_files:
-            HotMetalService(logger).process(str(hm_files[0]), cfg, run_dates)
+        if hm_file:
+            HotMetalService(logger).process(str(hm_file), cfg, run_dates)
 
     # -------------------------------------------------
     # RM & HM
     # -------------------------------------------------
     if "rm_hm" in modes:
-        rm_hm_files = sorted(
-            download_dir.glob("*RM & HM*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        rm_hm_file = _source_file_for_mode(
+            "rm_hm",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
-        if rm_hm_files:
+        if rm_hm_file:
             RMHMService(
-            logger,
-            neon_cfg=cfg["neon_developer"],
-            write_to_neon=True
-        ).process(str(rm_hm_files[0]), cfg, run_dates)
-        else:
-            logger.warning("No RM & HM file found after download.")
+                logger,
+                neon_cfg=cfg["neon_developer"],
+                write_to_neon=True,
+            ).process(str(rm_hm_file), cfg, run_dates)
 
     # -------------------------------------------------
     # RM STOCK
     # -------------------------------------------------
     if "rm_stock" in modes:
-        stock_files = sorted(
-            download_dir.glob("RM BULK STOCK*"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-            
+        stock_file = _source_file_for_mode(
+            "rm_stock",
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
 
-        if not stock_files:
-            logger.warning("No RM STOCK file found after download.")
-        else:
-            from domains.rm_stock.service import RMStockService
-
+        if stock_file:
             RMStockService(logger).process(
-                file_path=str(stock_files[0]),
+                file_path=str(stock_file),
                 cfg=cfg,
                 run_dates=run_dates,
             )
@@ -267,10 +392,11 @@ def main():
     # CHARGE
     # -------------------------------------------------
     if "charge" in modes:
-        charge_files = sorted(
-            download_dir.glob(f"CHARGE_AND_DUMP_REPORT_*.xlsx"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        charge_files = _charge_source_files(
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
         )
 
         charge_service = ChargeService(
@@ -284,25 +410,22 @@ def main():
         )
 
         for run_date in run_dates:
-            dt = datetime.strptime(run_date, "%d-%b-%Y")
+            charge_file = _charge_file_for_date(charge_files, run_date)
 
-            matching = [
-                p for p in charge_files
-                if f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}" in p.name
-            ]
-
-            if not matching:
-                logger.error(f"Charge file not found for {run_date}")
+            if not charge_file:
+                if args.skip_download:
+                    logger.error(f"Charge file not found for {run_date}")
+                else:
+                    logger.info(
+                        f"Charge file not downloaded for {run_date}; "
+                        "skipping read/DB write"
+                    )
                 continue
 
             charge_service.run(
-                charge_file=str(matching[0]),
+                charge_file=str(charge_file),
                 run_date_str=run_date,
             )
-
-
-
-
     logger.info("Offline data automation completed successfully.")
 
 
