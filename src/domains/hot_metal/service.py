@@ -2,6 +2,11 @@
 
 import os
 import pandas as pd
+from infrastructure.database_targets import (
+    DatabaseTarget,
+    influx_write_enabled,
+    write_to_database_targets,
+)
 from infrastructure.influx_client import InfluxClient
 from infrastructure.neon_client import NeonClient
 
@@ -21,6 +26,10 @@ class HotMetalService:
         self.updater = HotMetalConfigUpdater(logger)
 
     def _write_to_influx(self, df: pd.DataFrame, setting_cfg: dict, hm_cfg: dict) -> None:
+        if not influx_write_enabled(setting_cfg):
+            self.logger.info("InfluxDB disabled by write_db; skipping HOT_METAL Influx push")
+            return
+
         influx_cfg = dict(setting_cfg.get("influxdb") or {})
         token = os.getenv("INFLUX_TOKEN")
         if token:
@@ -88,7 +97,7 @@ class HotMetalService:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             out_path = os.path.join(OUTPUT_DIR, "combined_hot_data.xlsx")
             df.to_excel(out_path, index=False)
-            self.logger.info(f"HOT_METAL output written → {out_path}")
+            self.logger.info(f"HOT_METAL output written -> {out_path}")
             df["date"] = pd.to_datetime(df["date"])
             df["date"] = df["date"].dt.tz_localize(ist)
             # --- CLEAN NUMERIC COLUMNS ---
@@ -107,27 +116,26 @@ class HotMetalService:
                 # Convert to numeric safely
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            neon_cfg = setting_cfg.get("neon_developer")
-
-            if not neon_cfg:
-                self.logger.warning("Neon developer config missing — skipping DB insert")
-                continue
-
-            # New target: offline_feed.hot_metal_slag_analysis (date column → date_time)
+            # New target: offline_feed.hot_metal_slag_analysis (date column -> date_time)
             db_df = df.rename(columns={"date": "date_time"})
 
-            neon = NeonClient(neon_cfg)
-
-            try:
+            def writer(neon: NeonClient, target: DatabaseTarget) -> int:
                 rows = neon.insert_dataframe(
                     df=db_df,
                     table_name="offline_feed.hot_metal_slag_analysis",
                     conflict_cols=["lab_sample_id", "date_time"],
-                    upsert_mode="delete_insert",
+                    upsert_mode="update_insert",
                 )
-                self.logger.info(f"HOT_METAL {run_date}: {rows} rows synced → offline_feed.hot_metal_slag_analysis")
-            finally:
-                neon.close()
+                self.logger.info(
+                    f"HOT_METAL {run_date}: {rows} rows synced "
+                    f"to {target.label} -> offline_feed.hot_metal_slag_analysis"
+                )
+                return rows
 
-            if rows > 0:
-                self._write_to_influx(df, setting_cfg, hm_cfg)
+            write_to_database_targets(
+                setting_cfg,
+                self.logger,
+                "HOT_METAL",
+                writer,
+            )
+            self._write_to_influx(df, setting_cfg, hm_cfg)

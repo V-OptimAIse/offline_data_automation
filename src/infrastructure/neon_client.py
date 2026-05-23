@@ -3,13 +3,14 @@
 import psycopg2
 from psycopg2.extras import Json, execute_values
 import pandas as pd
+from uuid import uuid4
 
 
 class NeonClient:
     def __init__(self, db_config: dict):
         db_url = (db_config or {}).get("url")
         if not db_url:
-            raise ValueError("Neon DB url is missing. Check secrets.yaml and .env.")
+            raise ValueError("PostgreSQL DB url is missing. Check secrets.yaml and .env.")
 
         self.conn = psycopg2.connect(db_url)
         self.conn.autocommit = True
@@ -66,24 +67,49 @@ class NeonClient:
 
         return df
 
+    def _sync_serial_id_sequence(self, cur, table_name: str, table_sql: str) -> None:
+        cur.execute("SELECT pg_get_serial_sequence(%s, 'id')", (table_name,))
+        sequence_name = cur.fetchone()[0]
+        if not sequence_name:
+            return
+
+        cur.execute(
+            f"""
+            SELECT setval(
+                pg_get_serial_sequence(%s, 'id'),
+                (SELECT GREATEST(COALESCE(MAX(id), 0), 1) FROM {table_sql})
+            )
+            """,
+            (table_name,),
+        )
+
     # ------------------------------------------------------------------
     def insert_dataframe(
         self,
         df: pd.DataFrame,
         table_name: str,
         conflict_cols: list[str] | None = None,
-        upsert_mode: str = "on_conflict",  # "on_conflict" | "delete_insert"
+        upsert_mode: str = "update_insert",
     ) -> int:
         """
         Upsert `df` into `table_name`.
 
-        upsert_mode="on_conflict"   — requires a UNIQUE/PK constraint on conflict_cols.
-        upsert_mode="delete_insert" — deletes existing rows matching conflict_cols values,
-                                      then inserts; works without any DB constraint.
+        upsert_mode="update_insert" - updates matching rows, inserts missing rows,
+                                      and never deletes existing data.
+        upsert_mode="on_conflict"   - requires a UNIQUE/PK constraint on conflict_cols.
+        upsert_mode="delete_insert" - deletes matching rows, then inserts.
         Returns the number of rows processed.
         """
+        # update_insert is the preferred rerun mode for ingestion jobs: it
+        # updates existing keys and inserts missing keys without deleting rows.
         if df.empty:
             return 0
+
+        valid_upsert_modes = {"update_insert", "on_conflict", "delete_insert"}
+        if upsert_mode not in valid_upsert_modes:
+            raise ValueError(
+                f"Unsupported upsert_mode for {table_name}: {upsert_mode!r}"
+            )
 
         df = df.copy()
         conflict_cols = conflict_cols or ["material_id", "date_time"]
@@ -121,6 +147,77 @@ class NeonClient:
             for row in df.itertuples(index=False, name=None)
         ]
 
+        if upsert_mode == "update_insert":
+            df = df.drop_duplicates(subset=conflict_cols, keep="last")
+            cols = list(df.columns)
+            cols_sql = self._quote_columns(cols)
+            values = [
+                tuple(self._sql_value(value) for value in row)
+                for row in df.itertuples(index=False, name=None)
+            ]
+
+            temp_table = self._quote_identifier(f"_neon_upsert_{uuid4().hex}")
+            match_conditions = " AND ".join(
+                f"t.{self._quote_identifier(c)} = s.{self._quote_identifier(c)}"
+                for c in conflict_cols
+            )
+            update_cols = [c for c in cols if c not in conflict_cols]
+
+            if update_cols:
+                update_sql = ", ".join(
+                    f"{self._quote_identifier(c)} = s.{self._quote_identifier(c)}"
+                    for c in update_cols
+                )
+                update_query = f"""
+                    UPDATE {table_sql} AS t
+                    SET {update_sql}
+                    FROM {temp_table} AS s
+                    WHERE {match_conditions}
+                """
+            else:
+                update_query = None
+
+            select_cols_sql = ", ".join(
+                f"s.{self._quote_identifier(c)}" for c in cols
+            )
+            insert_query = f"""
+                INSERT INTO {table_sql} ({cols_sql})
+                SELECT {select_cols_sql}
+                FROM {temp_table} AS s
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM {table_sql} AS t
+                    WHERE {match_conditions}
+                )
+            """
+            temp_insert_query = f"INSERT INTO {temp_table} ({cols_sql}) VALUES %s"
+
+            with self.conn.cursor() as cur:
+                cur.execute("BEGIN")
+                try:
+                    select_typed_cols_sql = ", ".join(
+                        f"{self._quote_identifier(c)}" for c in cols
+                    )
+                    cur.execute(
+                        f"""
+                        CREATE TEMP TABLE {temp_table} ON COMMIT DROP AS
+                        SELECT {select_typed_cols_sql}
+                        FROM {table_sql}
+                        WHERE FALSE
+                        """
+                    )
+                    execute_values(cur, temp_insert_query, values)
+                    if update_query:
+                        cur.execute(update_query)
+                    self._sync_serial_id_sequence(cur, table_name, table_sql)
+                    cur.execute(insert_query)
+                    cur.execute("COMMIT")
+                except Exception:
+                    cur.execute("ROLLBACK")
+                    raise
+
+            return len(values)
+
         if upsert_mode == "delete_insert":
             delete_keys = [
                 tuple(self._sql_value(v) for v in row)
@@ -155,17 +252,7 @@ class NeonClient:
                     if delete_keys:
                         execute_values(cur, delete_sql, delete_keys, template=delete_template)
 
-                    # After deleting rows the serial sequence may point below the
-                    # current max(id) in the table (sequence is out of sync with
-                    # existing rows from other materials).  Advance it to max(id)
-                    # so the next INSERT never collides with a still-live row.
-                    cur.execute(
-                        f"SELECT CASE WHEN pg_get_serial_sequence(%s, 'id') IS NOT NULL "
-                        f"THEN setval(pg_get_serial_sequence(%s, 'id'), "
-                        f"  (SELECT GREATEST(COALESCE(MAX(id), 0), 1) FROM {table_sql})) END",
-                        (table_name, table_name),
-                    )
-
+                    self._sync_serial_id_sequence(cur, table_name, table_sql)
                     execute_values(cur, insert_sql, values)
                     cur.execute("COMMIT")
                 except Exception:

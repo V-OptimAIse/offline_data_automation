@@ -57,7 +57,9 @@ def parse_args():
     )
     parser.add_argument(
         "--skip-download",
+        "--skip",
         action="store_true",
+        dest="skip_download",
         help="Skip Selenium download step (use existing files)",
     )
 
@@ -240,7 +242,7 @@ def main():
     # -------------------------------------------------
     run_dates = parse_run_dates(args.rundate, args.today)
     logger.info(
-        f"Run dates resolved: {run_dates[0]} → {run_dates[-1]} "
+        f"Run dates resolved: {run_dates[0]} to {run_dates[-1]} "
         f"({len(run_dates)} day(s))"
     )
     download_dir = Path(cfg["download"]["download_dir"]).expanduser()
@@ -403,6 +405,7 @@ def main():
             ChargeServiceConfig(
                 output_dir="outputs",
                 neon_cfg=cfg["neon_developer"],
+                setting_cfg=cfg,
                 charge_yaml_path="src/config/charge.yaml",
                 write_to_neon=True,
             ),

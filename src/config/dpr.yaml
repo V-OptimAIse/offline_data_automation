@@ -9,7 +9,7 @@ dpr:
     schema: offline_feed
     table: dpr_data
     conflict_cols: [date_time]
-    upsert_mode: delete_insert
+    upsert_mode: update_insert
 
   influx:
     measurement: dpr_data

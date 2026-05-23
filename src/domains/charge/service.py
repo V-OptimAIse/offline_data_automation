@@ -10,6 +10,11 @@ from .reader import ChargeExcelReader
 from .processor import RawChargeProcessor
 from .hopper_repository import HopperSnapshotRepository
 import yaml
+from infrastructure.database_targets import (
+    DatabaseTarget,
+    iter_database_targets,
+    write_to_database_targets,
+)
 from infrastructure.neon_client import NeonClient
 
 
@@ -17,6 +22,7 @@ from infrastructure.neon_client import NeonClient
 class ChargeServiceConfig:
     output_dir: str
     neon_cfg: dict
+    setting_cfg: dict | None = None
     charge_yaml_path: str = "src/config/charge.yaml"
     write_to_neon: bool = False
 
@@ -28,8 +34,14 @@ class ChargeService:
         self.reader = ChargeExcelReader(logger=self.logger)
         self.processor = RawChargeProcessor()
         self.charge_cfg = self._load_charge_cfg()
+        snapshot_cfg = cfg.neon_cfg
+        if cfg.setting_cfg:
+            targets = iter_database_targets(cfg.setting_cfg)
+            if targets:
+                snapshot_cfg = targets[0].config
+
         self.snapshot_repo = HopperSnapshotRepository(
-            cfg.neon_cfg,
+            snapshot_cfg,
             hopper_cfg=self.charge_cfg.get("hopper_history"),
             material_cfg=self.charge_cfg.get("material_master"),
         )
@@ -83,9 +95,7 @@ class ChargeService:
             table = target_cfg.get("table", "charge_data")
             table_name = table if "." in table else f"{schema}.{table}"
 
-            client = NeonClient(self.cfg.neon_cfg)
-
-            try:
+            def writer(client: NeonClient, target: DatabaseTarget) -> int:
                 client.create_import_batch(
                     import_batch_id=import_batch_id,
                     source_type=batch_cfg.get("source_type", "excel"),
@@ -105,7 +115,7 @@ class ChargeService:
                         df=db_df,
                         table_name=table_name,
                         conflict_cols=target_cfg.get("conflict_cols", ["date_time"]),
-                        upsert_mode=target_cfg.get("upsert_mode", "delete_insert"),
+                        upsert_mode=target_cfg.get("upsert_mode", "update_insert"),
                     )
                 except Exception as exc:
                     client.update_import_batch(
@@ -126,10 +136,17 @@ class ChargeService:
                     schema=batch_cfg.get("schema", "ingest"),
                     table=batch_cfg.get("table", "import_batches"),
                 )
-                self.logger.info(f"Inserted/updated rows in {table_name}: {inserted}")
+                self.logger.info(
+                    f"{target.label}: inserted/updated rows in {table_name}: {inserted}"
+                )
+                return inserted
 
-            finally:
-                client.close()
+            write_to_database_targets(
+                self.cfg.setting_cfg or {"neon_developer": self.cfg.neon_cfg},
+                self.logger,
+                "charge",
+                writer,
+            )
 
         return final_df
 

@@ -1,6 +1,6 @@
 ﻿# Offline Data Automation
 
-Offline Data Automation processes plant offline Excel reports, prepares clean output files, and syncs validated data to configured storage systems such as NeonDB and InfluxDB.
+Offline Data Automation processes plant offline Excel reports, prepares clean output files, and syncs validated data to configured storage systems such as NeonDB, PI_DB, and InfluxDB.
 
 The project is organized by business domain so each report type has its own reader, transformer or processor, and service layer.
 
@@ -80,6 +80,8 @@ Use existing downloaded files without opening the portal:
 .\.venv\Scripts\python.exe src\app.py --mode rm_stock --today --skip-download
 ```
 
+`--skip` is also accepted as a short alias for `--skip-download`.
+
 Without `--skip-download`, processing runs only for source files downloaded in the
 current execution. If a portal file is unchanged, missing, or fails to download,
 that mode is skipped and no database write is attempted from an older local file.
@@ -125,5 +127,13 @@ Common output locations:
 
 - Use `--skip-download` when files are already present in the configured download directory.
 - Keep YAML mappings aligned with the latest Excel sheet names and column formats.
-- Database sync depends on valid `neon_developer` and InfluxDB configuration.
+- Database sync depends on valid NeonDB developer, PI_DB, and InfluxDB
+  configuration. Set `NEON_DEVELOPER_URL` or `NEON_DB_URL` for the developer
+  Neon branch and `PI_DB_URL` for the Raspberry Pi PostgreSQL clone.
+- Choose write destinations in `src/config/base.yaml` with `write_db`, for
+  example `[neon_db]`, `[influx_db]`, `[pi_db]`, or
+  `[neon_db, influx_db, pi_db]`.
+- PostgreSQL writes use the same schemas/tables for NeonDB developer and PI_DB,
+  with update-then-insert behavior for reruns: matching rows are updated in
+  place and missing rows are inserted.
 - Review logs after each production run for missing sheets, skipped rows, or sync warnings.

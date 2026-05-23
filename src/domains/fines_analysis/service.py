@@ -8,6 +8,7 @@ import pandas as pd
 
 from domains.fines_analysis.reader import FinesAnalysisReader
 from domains.fines_analysis.transformer import FinesAnalysisTransformer
+from infrastructure.database_targets import DatabaseTarget, write_to_database_targets
 from infrastructure.neon_client import NeonClient
 
 
@@ -67,33 +68,27 @@ class FinesAnalysisService:
         combined.to_excel(out_path, index=False)
         self.logger.info(f"Fines analysis output written -> {out_path}")
 
-        self._push_to_neon(combined, setting_cfg, fines_cfg)
+        self._push_to_database_targets(combined, setting_cfg, fines_cfg)
         self.logger.info("Fines analysis processing completed successfully")
 
         return combined
 
-    def _push_to_neon(
+    def _push_to_database_targets(
         self,
         df: pd.DataFrame,
         setting_cfg: dict,
         fines_cfg: dict,
     ) -> None:
-        neon_cfg = setting_cfg.get("neon_developer")
-        if not neon_cfg or not neon_cfg.get("url"):
-            self.logger.warning("Neon developer config missing or empty; skipping fines analysis DB push")
-            return
-
         fines_neon_cfg = fines_cfg.get("neon", {})
         schema = fines_neon_cfg.get("schema", "offline_feed")
         table = fines_neon_cfg.get("table", "material_fines_analysis")
         table_name = f"{schema}.{table}"
         conflict_cols = fines_neon_cfg.get("conflict_cols", ["material_code", "date_time"])
-        upsert_mode = fines_neon_cfg.get("upsert_mode", "delete_insert")
+        upsert_mode = fines_neon_cfg.get("upsert_mode", "update_insert")
         master_cfg = fines_neon_cfg.get("material_master", {})
 
-        self.logger.info("Pushing fines analysis data to developer Neon DB...")
-        neon_client = NeonClient(neon_cfg)
-        try:
+        def writer(neon_client: NeonClient, target: DatabaseTarget) -> int:
+            target_df = df.copy()
             material_codes = neon_client.fetch_material_codes(
                 schema=master_cfg.get("schema", "plant_master"),
                 table=master_cfg.get("table", "materials"),
@@ -101,27 +96,44 @@ class FinesAnalysisService:
                 active_column=master_cfg.get("active_column", "is_active"),
             )
             if material_codes:
-                before = len(df)
-                df = df[df["material_code"].str.lower().isin({code.lower() for code in material_codes})]
-                skipped = before - len(df)
+                before = len(target_df)
+                target_df = target_df[
+                    target_df["material_code"].str.lower().isin(
+                        {code.lower() for code in material_codes}
+                    )
+                ]
+                skipped = before - len(target_df)
                 if skipped:
-                    self.logger.warning(f"Skipped {skipped} fines rows with unknown material_code")
+                    self.logger.warning(
+                        f"{target.label}: skipped {skipped} fines rows with unknown material_code"
+                    )
             else:
-                self.logger.warning("No material codes loaded from plant_master.materials")
+                self.logger.warning(
+                    f"{target.label}: no material codes loaded from plant_master.materials"
+                )
 
             table_columns = neon_client.fetch_table_columns(schema, {table}).get(table, set())
             if table_columns:
-                insert_cols = [col for col in df.columns if col in table_columns]
-                df = df[insert_cols]
+                insert_cols = [col for col in target_df.columns if col in table_columns]
+                target_df = target_df[insert_cols]
             else:
-                self.logger.warning(f"No column metadata loaded for {table_name}; inserting configured columns")
+                self.logger.warning(
+                    f"{target.label}: no column metadata loaded for {table_name}; "
+                    "inserting configured columns"
+                )
 
             rows = neon_client.insert_dataframe(
-                df=df,
+                df=target_df,
                 table_name=table_name,
                 conflict_cols=conflict_cols,
                 upsert_mode=upsert_mode,
             )
-            self.logger.info(f"{table_name}: {rows} rows synced")
-        finally:
-            neon_client.close()
+            self.logger.info(f"{target.label} {table_name}: {rows} rows synced")
+            return rows
+
+        write_to_database_targets(
+            setting_cfg,
+            self.logger,
+            "fines analysis",
+            writer,
+        )

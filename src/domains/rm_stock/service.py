@@ -3,6 +3,7 @@ from domains.rm_stock.processor import RMStockProcessor
 import pandas as pd
 from pathlib import Path
 import yaml
+from infrastructure.database_targets import influx_write_enabled
 from infrastructure.influx_client import InfluxClient
 
 class RMStockService:
@@ -15,14 +16,14 @@ class RMStockService:
         self.material_map = self._load_materials()
 
     # -------------------------------------------------
-    # LOAD MATERIAL MAPPING (YAML → dict)
+    # LOAD MATERIAL MAPPING (YAML -> dict)
     # -------------------------------------------------
     def _load_materials(self):
         with open("src/config/rm_stock.yaml", "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
         if not isinstance(data, dict):
-            raise ValueError("rm_stock.yaml must be a dict (material → key)")
+            raise ValueError("rm_stock.yaml must be a dict (material -> key)")
 
         return {
             k.strip().lower(): v.strip()
@@ -31,7 +32,7 @@ class RMStockService:
         }
 
     # -------------------------------------------------
-    # MAP RAW MATERIAL → SHORT KEY
+    # MAP RAW MATERIAL -> SHORT KEY
     # -------------------------------------------------
     def _map_material(self, material: str):
         material = material.lower().strip()
@@ -83,7 +84,7 @@ class RMStockService:
             df = df.groupby("material_key", as_index=False)["physical_stock"].sum()
 
             # -----------------------------
-            # PIVOT → single row
+            # PIVOT -> single row
             # -----------------------------
             df_final = (
                 df.set_index("material_key")["physical_stock"]
@@ -107,7 +108,7 @@ class RMStockService:
         output_file = output_dir / "rm_stock_output.xlsx"
         final_df.to_excel(output_file, index=False)
 
-        self.logger.info(f"Excel written → {output_file}")
+        self.logger.info(f"Excel written -> {output_file}")
 
         self._write_to_influx(final_df, cfg)
 
@@ -115,6 +116,10 @@ class RMStockService:
     #  INFLUX WRITER
     # -------------------------------------------------
     def _write_to_influx(self, df, cfg):
+        if not influx_write_enabled(cfg):
+            self.logger.info("InfluxDB disabled by write_db; skipping RM STOCK Influx push")
+            return
+
         influx_cfg = cfg.get("influxdb")
 
         if not influx_cfg:

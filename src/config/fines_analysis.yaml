@@ -13,7 +13,7 @@ fines_analysis:
   neon:
     schema: offline_feed
     table: material_fines_analysis
-    upsert_mode: delete_insert
+    upsert_mode: update_insert
     conflict_cols: [material_code, date_time]
     material_master:
       schema: plant_master
@@ -87,7 +87,7 @@ fines_analysis:
       material_code: ore_5
       columns: A:Z
       header_row: 2
-      sheet_name: NMDC ROM
+      sheet_name: NMDC KIRANDUL
 
     LLOYDS_OVERSIZE_CLO:
       material_code: ore_6

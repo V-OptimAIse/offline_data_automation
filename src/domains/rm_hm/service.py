@@ -4,6 +4,11 @@ import os
 import pandas as pd
 from datetime import datetime
 from core.logging import log_file_read
+from infrastructure.database_targets import (
+    DatabaseTarget,
+    influx_write_enabled,
+    write_to_database_targets,
+)
 from infrastructure.influx_client import InfluxClient
 from infrastructure.neon_client import NeonClient
 
@@ -21,6 +26,10 @@ class RMHMService:
         self.write_to_neon = write_to_neon
 
     def _write_to_influx(self, df: pd.DataFrame, setting_cfg: dict) -> None:
+        if not influx_write_enabled(setting_cfg):
+            self.logger.info("InfluxDB disabled by write_db; skipping RM_HM Influx push")
+            return
+
         influx_cfg = dict(setting_cfg.get("influxdb") or {})
         token = os.getenv("INFLUX_TOKEN")
         if token:
@@ -115,7 +124,7 @@ class RMHMService:
         target_cols = ["ai", "ti", "rdi", "ri"]
         for col in target_cols:
             if col not in df.columns:
-                self.logger.warning(f"Column '{col}' missing — creating empty column")
+                self.logger.warning(f"Column '{col}' missing - creating empty column")
                 df[col] = pd.NA
 
         # ----------------------------
@@ -142,7 +151,7 @@ class RMHMService:
         # ----------------------------
         # RENAME + SELECT COLUMNS
         # ----------------------------
-        cols_to_keep = []  # ✅ FIX: always initialize
+        cols_to_keep = []
 
         if field_map:
             filtered = filtered.rename(columns=field_map)
@@ -174,32 +183,40 @@ class RMHMService:
         out_path = os.path.join(OUTPUT_DIR, "combined_rm_hm_data.xlsx")
         filtered.to_excel(out_path, index=False)
 
-        self.logger.info(f"RM & HM output written → {out_path}")
+        self.logger.info(f"RM & HM output written -> {out_path}")
 
         # ----------------------------
-        # WRITE TO NEON DB
+        # WRITE TO CONFIGURED DB TARGETS
         # ----------------------------
-        if self.write_to_neon and self.neon_cfg:
-            client = None
+        if self.write_to_neon:
             try:
-                client = NeonClient(self.neon_cfg)
+                db_cfg = dict(setting_cfg)
+                if self.neon_cfg:
+                    db_cfg["neon_developer"] = self.neon_cfg
 
-                rows = client.insert_dataframe(
-                    df=filtered,
-                    table_name="offline_feed.raw_material_strength_analysis",
-                    conflict_cols=["date_time"],
-                    upsert_mode="delete_insert",
+                def writer(client: NeonClient, target: DatabaseTarget) -> int:
+                    rows = client.insert_dataframe(
+                        df=filtered,
+                        table_name="offline_feed.raw_material_strength_analysis",
+                        conflict_cols=["date_time"],
+                        upsert_mode="update_insert",
+                    )
+
+                    self.logger.info(
+                        f"Inserted {rows} rows to {target.label} "
+                        "-> offline_feed.raw_material_strength_analysis"
+                    )
+                    return rows
+
+                write_to_database_targets(
+                    db_cfg,
+                    self.logger,
+                    "RM_HM",
+                    writer,
                 )
-
-                self.logger.info(f"Inserted {rows} rows → offline_feed.raw_material_strength_analysis")
-
-                if rows > 0:
-                    self._write_to_influx(filtered, setting_cfg)
+                self._write_to_influx(filtered, setting_cfg)
 
             except Exception as e:
-                self.logger.error(f"Failed to write RM_HM data to Neon: {e}")
-            finally:
-                if client:
-                    client.close()
+                self.logger.error(f"Failed to write RM_HM data to DB targets: {e}")
 
         return filtered

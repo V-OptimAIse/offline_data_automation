@@ -56,6 +56,37 @@ def _load_env(env_path: str | Path) -> None:
     load_dotenv(p.resolve(), override=False)
 
 
+def _env_value(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            value = value.strip().strip("\"'")
+            if value:
+                return value
+    return ""
+
+
+def _apply_database_url_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(cfg)
+    overrides = {
+        "neondb": ("NEON_DB_URL",),
+        "neon_prod": ("NEON_PROD_URL",),
+        "neon_developer": ("NEON_DEVELOPER_URL", "NEON_DB_URL", "DATABASE_URL"),
+        "pi_db": ("PI_DB_URL",),
+    }
+
+    for cfg_key, env_names in overrides.items():
+        database_url = _env_value(*env_names)
+        if not database_url:
+            continue
+
+        db_cfg = dict(out.get(cfg_key) or {})
+        db_cfg["url"] = database_url
+        out[cfg_key] = db_cfg
+
+    return out
+
+
 def load_config(
     base_path: str = "src/config/base.yaml",
     secrets_path: str = "src/config/secrets.yaml",
@@ -111,4 +142,4 @@ def load_config(
     merged["rm_hm"] = rm_hm_file_cfg.get("rm_hm", {})
     merged["rm_hm_fields"] = rm_hm_file_cfg.get("rm_hm_fields", {})
 
-    return _expand_env(merged)
+    return _apply_database_url_overrides(_expand_env(merged))

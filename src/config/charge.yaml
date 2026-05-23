@@ -14,7 +14,7 @@ charge:
   target:
     schema: offline_feed
     table: charge_data
-    upsert_mode: delete_insert
+    upsert_mode: update_insert
     conflict_cols: [date_time]
 
   import_batch:

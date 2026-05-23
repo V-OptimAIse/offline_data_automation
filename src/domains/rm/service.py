@@ -11,6 +11,11 @@ import pandas as pd
 from domains.rm.neon_mapper import RMNeonMapper
 from domains.rm.reader import RMReader
 from domains.rm.transformer import RMTransformer
+from infrastructure.database_targets import (
+    DatabaseTarget,
+    influx_write_enabled,
+    write_to_database_targets,
+)
 from infrastructure.influx_client import InfluxClient
 from infrastructure.neon_client import NeonClient
 
@@ -67,7 +72,7 @@ class RMService:
         self._write_to_influx(combined, setting_cfg, rm_cfg)
 
         neon_df = self._coerce_numeric_for_neon(combined.copy())
-        self._push_to_neon(neon_df, setting_cfg, rm_cfg)
+        self._push_to_database_targets(neon_df, setting_cfg, rm_cfg)
 
         self.logger.info("RM processing completed successfully")
         return neon_df
@@ -299,6 +304,10 @@ class RMService:
         setting_cfg: dict[str, Any],
         rm_cfg: dict[str, Any],
     ) -> None:
+        if not influx_write_enabled(setting_cfg):
+            self.logger.info("InfluxDB disabled by write_db; skipping RM Influx push")
+            return
+
         influx_cfg = dict(setting_cfg.get("influxdb") or {})
         token = os.getenv("INFLUX_TOKEN")
         if token:
@@ -330,30 +339,25 @@ class RMService:
         rm_cfg = setting_cfg.get("rm", setting_cfg)
         self._write_to_influx(df, setting_cfg, rm_cfg)
 
-    def _push_to_neon(
+    def _push_to_database_targets(
         self,
         df: pd.DataFrame,
         setting_cfg: dict[str, Any],
         rm_cfg: dict[str, Any],
     ) -> None:
-        neon_cfg = setting_cfg.get("neon_developer")
-        if not neon_cfg or not neon_cfg.get("url"):
-            self.logger.warning("Neon developer config missing or empty; skipping RM DB push")
-            return
+        def writer(client: NeonClient, target: DatabaseTarget) -> int:
+            rows = self._sync_neon_tables(client, df, rm_cfg)
+            self.logger.info(f"RM synced to {target.label}: {rows} rows")
+            return rows
 
-        self.logger.info("Pushing RM data to developer Neon DB...")
-        neon_client = NeonClient(neon_cfg)
-        try:
-            self._sync_neon_tables(neon_client, df, rm_cfg)
-        finally:
-            neon_client.close()
+        write_to_database_targets(setting_cfg, self.logger, "RM", writer)
 
     def _sync_neon_tables(
         self,
         neon_client: NeonClient,
         df: pd.DataFrame,
         rm_cfg: dict[str, Any],
-    ) -> None:
+    ) -> int:
         rm_neon_cfg = rm_cfg.get("neon", {})
         category_map = rm_neon_cfg.get("category_map", {})
         schema = rm_neon_cfg.get("schema", "offline_feed")
@@ -361,7 +365,7 @@ class RMService:
             "conflict_cols",
             ["material_code", "date_time"],
         )
-        upsert_mode = rm_neon_cfg.get("upsert_mode", "delete_insert")
+        upsert_mode = rm_neon_cfg.get("upsert_mode", "update_insert")
         master_cfg = rm_neon_cfg.get("material_master", {})
 
         material_codes = neon_client.fetch_material_codes(
@@ -393,6 +397,7 @@ class RMService:
             logger=self.logger,
         )
 
+        total_rows = 0
         for table_name, table_df in mapper.iter_table_dfs(df):
             try:
                 rows = neon_client.insert_dataframe(
@@ -401,7 +406,10 @@ class RMService:
                     conflict_cols=conflict_cols,
                     upsert_mode=upsert_mode,
                 )
+                total_rows += rows
                 self.logger.info(f"    {table_name}: {rows} rows synced")
             except Exception:
                 self.logger.exception(f"    Failed for {table_name}")
                 raise
+
+        return total_rows

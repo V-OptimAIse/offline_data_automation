@@ -29,5 +29,5 @@ class HotMetalConfigUpdater:
             self.logger.warning(f"Reused HOT METAL config block for '{target}'")
 
         hm["sheet_name"] = target
-        self.logger.info(f"HOT_METAL_CONFIG updated → sheet_name: {target}")
+        self.logger.info(f"HOT_METAL_CONFIG updated -> sheet_name: {target}")
         return hm_cfg

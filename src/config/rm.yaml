@@ -14,7 +14,7 @@ rm:
 
   neon:
     schema: offline_feed
-    upsert_mode: delete_insert
+    upsert_mode: update_insert
     conflict_cols: [material_code, date_time]
     material_master:
       schema: plant_master

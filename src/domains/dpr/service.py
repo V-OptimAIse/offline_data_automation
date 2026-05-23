@@ -11,6 +11,11 @@ import pandas as pd
 
 from domains.dpr.reader import DPRReader
 from domains.dpr.config_updater import DPRConfigUpdater
+from infrastructure.database_targets import (
+    DatabaseTarget,
+    influx_write_enabled,
+    write_to_database_targets,
+)
 from infrastructure.influx_client import InfluxClient
 from infrastructure.neon_client import NeonClient
 output_dir = "output/dpr"
@@ -48,6 +53,10 @@ class DPRService:
         dpr_cfg: Dict[str, Any],
         setting_cfg: Dict[str, Any],
     ) -> None:
+        if not influx_write_enabled(setting_cfg):
+            self.logger.info("InfluxDB disabled by write_db; skipping DPR Influx push")
+            return
+
         influx_cfg = dict(setting_cfg.get("influxdb") or {})
         token = os.getenv("INFLUX_TOKEN")
         if token:
@@ -115,7 +124,9 @@ class DPRService:
             df = df.rename(columns=field_mapping)
 
             if df.columns.duplicated().any():
-                self.logger.warning(f"Duplicate columns for {run_date} — keeping first occurrence")
+                self.logger.warning(
+                    f"Duplicate columns for {run_date} - keeping first occurrence"
+                )
                 df = df.loc[:, ~df.columns.duplicated()]
 
             if "date_time" not in df.columns:
@@ -124,7 +135,9 @@ class DPRService:
             for col in required_cols:
                 if col not in df.columns:
                     df[col] = None
-                    self.logger.warning(f"'{col}' missing for {run_date} → filled with NULL")
+                    self.logger.warning(
+                        f"'{col}' missing for {run_date} -> filled with NULL"
+                    )
 
             all_frames.append(df[["date_time"] + required_cols])
 
@@ -140,40 +153,30 @@ class DPRService:
         os.makedirs(output_dir, exist_ok=True)
         out_path = os.path.join(output_dir, output_filename)
         combined.to_excel(out_path, index=False)
-        self.logger.info(f"DPR output written → {out_path}")
+        self.logger.info(f"DPR output written -> {out_path}")
 
-        neon_cfg = setting_cfg.get("neon_developer")
-        neon_written = False
-        if neon_cfg and neon_cfg.get("url"):
-            dpr_neon = dpr_cfg.get("neon", {})
-            table = dpr_neon.get("table", "dpr_data")
-            schema = dpr_neon.get("schema")
-            if schema and "." not in table:
-                table = f"{schema}.{table}"
+        dpr_neon = dpr_cfg.get("neon", {})
+        table = dpr_neon.get("table", "dpr_data")
+        schema = dpr_neon.get("schema")
+        if schema and "." not in table:
+            table = f"{schema}.{table}"
 
-            conflict_cols = dpr_neon.get("conflict_cols", ["date_time"])
-            upsert_mode = dpr_neon.get("upsert_mode", "delete_insert")
+        conflict_cols = dpr_neon.get("conflict_cols", ["date_time"])
+        upsert_mode = dpr_neon.get("upsert_mode", "update_insert")
 
-            self.logger.info(f"Pushing DPR data to NeonDB table: {table}")
-            neon = NeonClient(neon_cfg)
-            try:
-                rows = neon.insert_dataframe(
-                    df=combined,
-                    table_name=table,
-                    conflict_cols=conflict_cols,
-                    upsert_mode=upsert_mode,
-                )
-                self.logger.info(f"DPR pushed to NeonDB: {rows} rows upserted")
-                neon_written = rows > 0
-            except Exception:
-                self.logger.exception("DPR NeonDB push failed")
-                raise
-            finally:
-                neon.close()
-        else:
-            self.logger.warning("Neon developer config missing or empty; skipping DPR DB push")
+        def writer(neon: NeonClient, target: DatabaseTarget) -> int:
+            rows = neon.insert_dataframe(
+                df=combined,
+                table_name=table,
+                conflict_cols=conflict_cols,
+                upsert_mode=upsert_mode,
+            )
+            self.logger.info(
+                f"DPR pushed to {target.label} table {table}: {rows} rows upserted"
+            )
+            return rows
 
-        if neon_written:
-            self._write_to_influx(combined, dpr_cfg, setting_cfg)
+        write_to_database_targets(setting_cfg, self.logger, "DPR", writer)
+        self._write_to_influx(combined, dpr_cfg, setting_cfg)
 
         return combined

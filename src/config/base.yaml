@@ -7,6 +7,18 @@ logging:
   level: INFO
   dir: output/logs
 
+# Choose one or more write targets: neon_db, influx_db, pi_db
+# Examples:
+#   write_db: [neon_db]
+#   write_db: [influx_db]
+#   write_db: [pi_db]
+#   write_db: [neon_db, influx_db, pi_db]
+write_db: [neon_db, influx_db, pi_db]
+
+database:
+  # Deprecated: use top-level write_db.
+  write_targets: [neon_developer, pi_db]
+
 eml:
   login_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/"
   file_station_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/?launchApp=SYNO.SDS.App.FileStation3.Instance&SynoToken=laNlkmozfCC0g"
