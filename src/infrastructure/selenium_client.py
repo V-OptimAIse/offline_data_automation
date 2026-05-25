@@ -46,6 +46,7 @@ class SeleniumClient:
             #  Raspberry Pi / Linux server
             chrome_options.binary_location = chromium_path
             chrome_options.add_argument("--headless=new")
+            chrome_options.add_argument("--window-size=1920,1080")
 
             service = Service(chromedriver_path)
 
