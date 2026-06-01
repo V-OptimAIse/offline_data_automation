@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Dict, Set, List
 from zoneinfo import ZoneInfo
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import MoveTargetOutOfBoundsException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+CHARGE_DOWNLOAD_RETRIES = 5
 
 
 # -------------------------------------------------
@@ -473,6 +474,78 @@ class PortalDownloader:
             time.sleep(3)
         return DownloadOutcome(status="failed")
 
+    def _charge_name_matches(self, name: str, stem: str) -> bool:
+        return name == f"{stem}.xlsx" or (
+            name.startswith(stem) and name.lower().endswith(".xlsx")
+        )
+
+    def _find_visible_charge_row(self, panel, stem: str):
+        for row in self._get_visible_rows(panel):
+            name = row["name"].strip()
+            if name and self._charge_name_matches(name, stem):
+                return row
+        return None
+
+    def _download_charge_file_with_retry(self, panel, stem: str) -> tuple[str | None, str]:
+        last_name = f"{stem}.xlsx"
+
+        for attempt in range(1, CHARGE_DOWNLOAD_RETRIES + 1):
+            try:
+                panel = self._find_visible_file_grid_panel()
+            except Exception:
+                pass
+
+            row = self._find_visible_charge_row(panel, stem)
+            if not row:
+                self.logger.warning(
+                    "Charge file row not visible during download retry "
+                    f"({attempt}/{CHARGE_DOWNLOAD_RETRIES}): {last_name}"
+                )
+                self._page_down_file_grid(panel)
+                time.sleep(0.6)
+                continue
+
+            name = row["name"].strip()
+            last_name = name
+
+            try:
+                self.logger.info(
+                    f"Starting browser download: {name} "
+                    f"(attempt {attempt}/{CHARGE_DOWNLOAD_RETRIES})"
+                )
+                start = time.time()
+
+                if not self._click_grid_cell(row.get("cell") or row["el"], panel):
+                    raise WebDriverException(f"Could not click charge file: {name}")
+
+                downloaded_path = self._wait_for_download(start, name)
+                if downloaded_path:
+                    if attempt > 1:
+                        self.logger.info(
+                            f"Charge file downloaded after retry {attempt}: {name}"
+                        )
+                    return downloaded_path, name
+
+                self.logger.warning(
+                    f"Download attempt timed out ({attempt}/{CHARGE_DOWNLOAD_RETRIES}): {name}"
+                )
+            except MoveTargetOutOfBoundsException as exc:
+                self.logger.warning(
+                    "Move target out of bounds while downloading charge file "
+                    f"({attempt}/{CHARGE_DOWNLOAD_RETRIES}): {name}. Retrying. "
+                    f"Error: {exc}"
+                )
+            except WebDriverException as exc:
+                self.logger.warning(
+                    "Browser click/download attempt failed for charge file "
+                    f"({attempt}/{CHARGE_DOWNLOAD_RETRIES}): {name}. Retrying. "
+                    f"Error: {exc}"
+                )
+
+            time.sleep(min(attempt, 3))
+
+        return None, last_name
+
     # -------------------------------------------------
     # CHARGE
     # -------------------------------------------------
@@ -519,37 +592,26 @@ class PortalDownloader:
                     continue
 
                 stem = next(
-                    (
-                        s
-                        for s in pending_stems
-                        if name == f"{s}.xlsx"
-                        or (
-                            name.startswith(s)
-                            and name.lower().endswith(".xlsx")
-                        )
-                    ),
+                    (s for s in pending_stems if self._charge_name_matches(name, s)),
                     None,
                 )
                 if not stem:
                     continue
 
                 self.logger.info(f"Required charge file found: {name}")
-                start = time.time()
-                if not self._click_grid_cell(r.get("cell") or r["el"], panel):
-                    self.logger.error(f"Could not click charge file: {name}")
-                    failed.add(name)
-                    pending_stems.remove(stem)
-                    matched_on_page = True
-                    continue
 
-                self.logger.info(f"Starting browser download: {name}")
-                downloaded_path = self._wait_for_download(start, name)
+                downloaded_path, downloaded_name = self._download_charge_file_with_retry(
+                    panel, stem
+                )
                 if downloaded_path:
-                    self.logger.info(f"Download completed: {name}")
+                    self.logger.info(f"Download completed: {downloaded_name}")
                     downloaded_paths.append(downloaded_path)
                 else:
-                    self.logger.error(f"Download failed: {name}")
-                    failed.add(name)
+                    self.logger.error(
+                        f"Download failed after {CHARGE_DOWNLOAD_RETRIES} attempts: "
+                        f"{downloaded_name}"
+                    )
+                    failed.add(downloaded_name)
 
                 pending_stems.remove(stem)
                 matched_on_page = True
