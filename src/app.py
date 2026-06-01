@@ -267,18 +267,21 @@ def main():
                 metadata_path=cfg["download"]["metadata_path"],
                 file_station_url=cfg["eml"]["file_station_url"],
                 hourly_url=cfg["eml"]["hourly_url"],
-                portal_files=cfg["portal_files"],
             ),
             logger,
         )
 
         try:
+            logger.info("Starting browser for portal login")
             selenium.start()
+
+            logger.info("Logging in to portal")
             selenium.login(
                 login_url=cfg["eml"]["login_url"],
                 user=cfg["eml"]["user"],
                 password=cfg["eml"]["password"],
             )
+            logger.info("Login successful; moving to File Station download flow")
 
             download_result = downloader.download(
                 modes=modes,

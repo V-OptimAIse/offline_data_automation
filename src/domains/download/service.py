@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Dict, Set, List
 from zoneinfo import ZoneInfo
 
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -26,7 +26,6 @@ class DownloadConfig:
     metadata_path: str
     file_station_url: str
     hourly_url: str
-    portal_files: Dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -118,9 +117,9 @@ class PortalDownloader:
             .strip()
         )
 
-    def _wait_for_rows(self, timeout=15):
+    def _wait_for_rows(self, root=None, timeout=15):
         for _ in range(timeout):
-            rows = self._get_visible_rows()
+            rows = self._get_visible_rows(root)
             if rows and any(r["name"].strip() for r in rows):
                 return rows
             time.sleep(1)
@@ -192,33 +191,181 @@ class PortalDownloader:
     # -------------------------------------------------
     # GET ROWS
     # -------------------------------------------------
-    def _get_visible_rows(self):
+    def _get_visible_rows(self, root=None):
         return self.sc.driver.execute_script("""
-            return [...document.querySelectorAll('.x-grid3-row')].map(r=>{
-                const t=[...r.querySelectorAll('.x-grid3-cell-inner')]
-                            .map(c=>c.innerText.trim());
+            const root = arguments[0] || document;
+            const rows = [...root.querySelectorAll('.x-grid3-body .x-grid3-row, .x-grid3-row')];
+
+            return rows.map(r=>{
+                const cells = [...r.querySelectorAll('.x-grid3-cell-inner')];
+                const nameCell = r.querySelector('.x-grid3-cell-inner.x-grid3-col-filename') || cells[0] || r;
+                const name = (
+                    nameCell.getAttribute('ext:qtip') ||
+                    nameCell.innerText ||
+                    (cells[0] && cells[0].innerText) ||
+                    ''
+                ).replace(/\\u00a0/g, ' ').trim();
+
                 return {
                     el: r,
-                    name: t[0] || '',
-                    modified: t[3] || ''
+                    cell: nameCell,
+                    name,
+                    modified: (cells[3] && cells[3].innerText.trim()) || ''
                 };
-            });
-        """)
+            }).filter(r => r.name || r.modified);
+        """, root)
+
+    def _find_visible_file_grid_panel(self):
+        return self.sc.wait.until(
+            lambda d: d.execute_script("""
+                const panels = [
+                    ...document.querySelectorAll(
+                        '.syno-sds-fs-grid-scroller.x-grid3-scroller, .x-grid3-scroller'
+                    )
+                ];
+
+                function isVisible(el) {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 50 &&
+                        rect.height > 50 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        !!el.querySelector('.x-grid3-body');
+                }
+
+                const visiblePanels = panels.filter(isVisible);
+                return visiblePanels.find(p => p.classList.contains('syno-sds-fs-grid-scroller')) ||
+                    visiblePanels.find(p => p.querySelector('.webfm-file-type-icon')) ||
+                    visiblePanels[0] ||
+                    null;
+            """)
+        )
+
+    def _click_grid_cell(self, cell, panel=None) -> bool:
+        metrics = self.sc.driver.execute_script("""
+            const el = arguments[0];
+            const panel = arguments[1];
+
+            el.scrollIntoView({block: 'center', inline: 'nearest'});
+
+            const rect = el.getBoundingClientRect();
+            const panelRect = panel ? panel.getBoundingClientRect() : {
+                left: 0,
+                top: 0,
+                right: window.innerWidth,
+                bottom: window.innerHeight
+            };
+
+            const left = Math.max(rect.left, panelRect.left, 0);
+            const right = Math.min(rect.right, panelRect.right, window.innerWidth);
+            const top = Math.max(rect.top, panelRect.top, 0);
+            const bottom = Math.min(rect.bottom, panelRect.bottom, window.innerHeight);
+            const width = right - left;
+            const height = bottom - top;
+
+            if (width < 3 || height < 3) {
+                return {visible: false, rect, panelRect};
+            }
+
+            return {
+                visible: true,
+                x: Math.floor(left + Math.min(24, width / 2)),
+                y: Math.floor(top + height / 2),
+                rect,
+                panelRect
+            };
+        """, cell, panel)
+
+        if not metrics.get("visible"):
+            return False
+
+        x = metrics["x"]
+        y = metrics["y"]
+
+        try:
+            for event in (
+                {"type": "mouseMoved"},
+                {"type": "mousePressed", "button": "left", "clickCount": 1},
+                {"type": "mouseReleased", "button": "left", "clickCount": 1},
+                {"type": "mousePressed", "button": "left", "clickCount": 2},
+                {"type": "mouseReleased", "button": "left", "clickCount": 2},
+            ):
+                self.sc.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    {"x": x, "y": y, **event},
+                )
+            return True
+        except (AttributeError, WebDriverException) as exc:
+            self.logger.warning(f"CDP double-click failed, using DOM fallback: {exc}")
+
+        return bool(
+            self.sc.driver.execute_script("""
+                const el = arguments[0];
+                const events = [
+                    'mouseover', 'mousemove',
+                    'mousedown', 'mouseup', 'click',
+                    'mousedown', 'mouseup', 'click',
+                    'dblclick'
+                ];
+
+                for (const type of events) {
+                    el.dispatchEvent(new MouseEvent(type, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        button: 0
+                    }));
+                }
+                return true;
+            """, cell)
+        )
+
+    def _page_down_file_grid(self, panel) -> None:
+        focus_el = self.sc.driver.execute_script("""
+            const panel = arguments[0];
+            const focusEl = panel.querySelector('.x-grid3-focus') || panel;
+            focusEl.focus({preventScroll: true});
+            panel.dispatchEvent(new WheelEvent('wheel', {
+                deltaY: Math.max(500, panel.clientHeight * 0.85),
+                bubbles: true,
+                cancelable: true,
+                view: window
+            }));
+            return focusEl;
+        """, panel)
+
+        try:
+            focus_el.send_keys(Keys.PAGE_DOWN)
+        except WebDriverException:
+            self.sc.driver.execute_script("""
+                const target = arguments[0];
+                for (const type of ['keydown', 'keyup']) {
+                    target.dispatchEvent(new KeyboardEvent(type, {
+                        key: 'PageDown',
+                        code: 'PageDown',
+                        keyCode: 34,
+                        which: 34,
+                        bubbles: true,
+                        cancelable: true
+                    }));
+                }
+            """, focus_el)
 
     # -------------------------------------------------
     # FIND LATEST FILE
     # -------------------------------------------------
     def _find_latest_matching_file(self, rows, keywords: List[str]):
         matches = []
+        keyword_norms = [self._normalize_name(k) for k in keywords]
 
         for r in rows:
             name = self._normalize_name(r["name"])
-            keywords = [self._normalize_name(k) for k in keywords]
 
             if not name.strip():
                 continue
 
-            if all(k in name for k in keywords):
+            if all(k in name for k in keyword_norms):
                 dt = _parse_dt(r["modified"]) or datetime.min
                 matches.append((r, dt))
 
@@ -232,16 +379,18 @@ class PortalDownloader:
     # DOWNLOAD WITH METADATA CHECK
     # -------------------------------------------------
     def _download_latest_file(self, url: str, keywords: List[str]) -> DownloadOutcome:
-        self.logger.info(f"Searching latest file using keywords: {keywords}")
+        self.logger.info(f"Opening File Station for keyword search: {keywords}")
 
         self.sc.driver.get(url)
         self.sc.wait.until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
+        self.logger.info("File Station page loaded")
 
         time.sleep(2)
 
         try:
+            self.logger.info("Sorting File Station grid by Modified Date if available")
             self.sc.driver.find_element(
                 By.XPATH, "//span[contains(text(),'Modified Date')]"
             ).click()
@@ -252,13 +401,20 @@ class PortalDownloader:
         self.sc.wait.until(
             EC.presence_of_element_located((By.CLASS_NAME, "x-grid3-body"))
         )
+        self.logger.info("File Station grid is ready; reading visible rows")
 
-        rows = self._wait_for_rows()
+        try:
+            panel = self._find_visible_file_grid_panel()
+        except Exception:
+            panel = None
+
+        rows = self._wait_for_rows(panel)
 
         if not rows:
             self.logger.error("File list not loaded (timeout)")
             return DownloadOutcome(status="failed")
 
+        self.logger.info(f"Finding required file using keywords: {keywords}")
         target = self._find_latest_matching_file(rows, keywords)
 
         if not target:
@@ -269,7 +425,7 @@ class PortalDownloader:
         name = self._normalize_name(target["name"])
         modified = target["modified"]
 
-        self.logger.info(f"Latest file: {name} | Modified: {modified}")
+        self.logger.info(f"Required file found: {target['name']} | Modified: {modified}")
 
         prev_modified = metadata["root"].get(name)
 
@@ -277,13 +433,12 @@ class PortalDownloader:
             self.logger.info(f"SKIPPED (no change): {name}")
             return DownloadOutcome(status="skipped", portal_name=target["name"])
 
-        self.logger.info(f"Downloading: {target['name']}")
+        self.logger.info(f"Starting browser download: {target['name']}")
 
         start = time.time()
-        self.sc.driver.execute_script(
-            "arguments[0].scrollIntoView({block:'center'})", target["el"]
-        )
-        ActionChains(self.sc.driver).double_click(target["el"]).perform()
+        if not self._click_grid_cell(target.get("cell") or target["el"], panel):
+            self.logger.error(f"Could not click file row: {target['name']}")
+            return DownloadOutcome(status="failed", portal_name=target["name"])
 
         downloaded_path = self._wait_for_download(start, name, keywords)
         if not downloaded_path:
@@ -322,49 +477,44 @@ class PortalDownloader:
     # CHARGE
     # -------------------------------------------------
     def _scroll_and_download_charge(self, url: str, run_dates: list) -> DownloadOutcome:
+        self.logger.info("Opening File Station charge folder")
         self.sc.driver.get(url)
         self.sc.wait.until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
+        self.logger.info("File Station charge folder loaded")
         time.sleep(1)
-
-        try:
-            panel = self.sc.wait.until(
-                EC.presence_of_element_located((By.CLASS_NAME, "x-grid3-scroller"))
-            )
-        except Exception:
-            self.logger.error("Could not locate scroll panel.")
-            return DownloadOutcome(status="failed")
 
         pending_stems = set()
         for rd in run_dates:
             dt = datetime.strptime(rd, "%d-%b-%Y")
-            for stem in (
-                f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}",
-            ):
-                pending_stems.add(stem)
+            pending_stems.add(
+                f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}"
+            )
 
-        self.logger.info(
-            f"Looking for: {', '.join(sorted(stem + '.xlsx' for stem in pending_stems))}"
-        )
+        required_files = ", ".join(sorted(stem + ".xlsx" for stem in pending_stems))
+        self.logger.info(f"Finding required charge file(s): {required_files}")
+        self.logger.info("Using File Station UI download path for charge files")
+
+        try:
+            panel = self._find_visible_file_grid_panel()
+        except Exception:
+            self.logger.error("Could not locate File Station grid panel.")
+            return DownloadOutcome(status="failed")
+        self.logger.info("File Station grid is ready; scanning visible rows")
 
         downloaded_paths: list[str] = []
         failed: Set[str] = set()
 
-        for _ in range(60):
+        for attempt in range(60):
             if not pending_stems:
                 break
 
-            rows = self.sc.driver.execute_script("""
-                return [...document.querySelectorAll('.x-grid3-body .x-grid3-row')].map(r=>{
-                    const t=[...r.querySelectorAll('.x-grid3-cell-inner')].map(c=>c.innerText.trim());
-                    return {el:r, n:t[0]||'', m:t[3]||''};
-                });
-            """)
+            rows = self._get_visible_rows(panel)
 
             matched_on_page = False
             for r in rows:
-                name = r["n"].strip()
+                name = r["name"].strip()
                 if not name:
                     continue
 
@@ -383,21 +533,19 @@ class PortalDownloader:
                 if not stem:
                     continue
 
-                self.logger.info(f"Found charge file: {name}")
-                self.sc.driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'})", r["el"]
-                )
+                self.logger.info(f"Required charge file found: {name}")
                 start = time.time()
-                (
-                    ActionChains(self.sc.driver)
-                    .move_to_element(r["el"])
-                    .double_click(r["el"])
-                    .perform()
-                )
+                if not self._click_grid_cell(r.get("cell") or r["el"], panel):
+                    self.logger.error(f"Could not click charge file: {name}")
+                    failed.add(name)
+                    pending_stems.remove(stem)
+                    matched_on_page = True
+                    continue
 
+                self.logger.info(f"Starting browser download: {name}")
                 downloaded_path = self._wait_for_download(start, name)
                 if downloaded_path:
-                    self.logger.info(f"Downloaded: {name}")
+                    self.logger.info(f"Download completed: {name}")
                     downloaded_paths.append(downloaded_path)
                 else:
                     self.logger.error(f"Download failed: {name}")
@@ -409,13 +557,12 @@ class PortalDownloader:
             if matched_on_page:
                 continue
 
-            (
-                ActionChains(self.sc.driver)
-                .move_to_element(panel)
-                .click()
-                .send_keys(Keys.PAGE_DOWN)
-                .perform()
-            )
+            if attempt == 0 or (attempt + 1) % 10 == 0:
+                self.logger.info(
+                    "Required charge file not visible yet; paging through lazy-loaded grid "
+                    f"({attempt + 1}/60)"
+                )
+            self._page_down_file_grid(panel)
             time.sleep(0.6)
 
         if pending_stems:
