@@ -277,7 +277,7 @@ rm:
     QUARTZ:                   {col_prefix: FLUX_2_,        columns: A:I, header_row: 2, sheet_name: QUARTZ}
     SINTER:                   {col_prefix: SINTER_SP_02_,  columns: A:P, header_row: 2, sheet_name: SINTER}
     LIMESTONE:                {col_prefix: FLUX_3_,        columns: A:L, header_row: 2, sheet_name: LIMESTONE}
-    LLOYDS_PELLET:            {col_prefix: LLOYDS_PELLET_, columns: A:R, header_row: 2, sheet_name: LLOYDS-PELLET}
+    LLOYDS_PELLET:            {col_prefix: LLOYDS_PELLET_, columns: A:R, header_row: 3, sheet_name: LLOYDS PELLET}
     ACORE_IND:                {col_prefix: ORE_8_,         columns: A:S, header_row: 3, sheet_name: ACORE IND.PVT LTD}
     GOMTI:                    {col_prefix: ORE_10_,        columns: A:R, header_row: 3, sheet_name: GOMTI}
 

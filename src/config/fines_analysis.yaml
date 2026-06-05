@@ -128,5 +128,5 @@ fines_analysis:
     LLOYDS_PELLET:
       material_code: pellet_1
       columns: A:AA
-      header_row: 2
-      sheet_name: LLOYDS-PELLET
+      header_row: 3
+      sheet_name: LLOYDS PELLET
