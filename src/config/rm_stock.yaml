@@ -201,6 +201,6 @@ db_material_map:
   Quartzite: flux_2
 
   # ---------------- SINTER ----------------
-  "G-1 TOTAL": sinter_1
-  "G-2 TOTAL": sinter_2
-  "G-3 TOTAL": sinter_3
+  # "G-1 TOTAL": sinter_1
+  # "G-2 TOTAL": sinter_2
+  # "G-3 TOTAL": sinter_3
