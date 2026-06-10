@@ -122,7 +122,7 @@ class RMStockService:
     # -------------------------------------------------
     # MAIN PROCESS
     # -------------------------------------------------
-    def process(self, file_path: str, cfg: dict, run_dates):
+    def process(self, file_path: str, cfg: dict, run_dates, sinter_file_path: str | None = None):
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
 
@@ -135,8 +135,18 @@ class RMStockService:
             try:
                 df, ts = self.reader.read(file_path, run_date)
             except Exception as e:
-                self.logger.error(f"{run_date} failed: {e}")
-                continue
+                self.logger.warning(f"{run_date} bulk stock skipped: {e}")
+                df = pd.DataFrame(columns=["material", "physical_stock"])
+                ts = pd.to_datetime(run_date, format="%d-%b-%Y")
+
+            if sinter_file_path:
+                try:
+                    df = pd.concat(
+                        [df, self.reader.read_sinter_stock(sinter_file_path, run_date)],
+                        ignore_index=True,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"{run_date} sinter stock skipped: {e}")
 
             # -----------------------------
             # CLEAN + MAP MATERIALS
@@ -204,7 +214,13 @@ class RMStockService:
 
         self._write_to_influx(final_df, cfg)
         stock_df = pd.concat(stock_rows, ignore_index=True)
-        self._push_to_database_targets(stock_df, cfg, file_path, run_dates)
+        self._push_to_database_targets(
+            stock_df,
+            cfg,
+            file_path,
+            run_dates,
+            sinter_file_path,
+        )
 
     def _target_db_frame(self, df, material_codes, import_batch_id, created_at):
         material_codes_by_lower = {
@@ -249,11 +265,24 @@ class RMStockService:
     # -------------------------------------------------
     # POSTGRES WRITER (NEON + PI)
     # -------------------------------------------------
-    def _push_to_database_targets(self, df, cfg, file_path, run_dates):
+    def _push_to_database_targets(self, df, cfg, file_path, run_dates, sinter_file_path=None):
         import_batch_id = str(uuid4())
         created_at = pd.Timestamp.now(tz="UTC")
         source_path = Path(file_path)
         source_hash = self._file_sha256(source_path)
+        sinter_path = Path(sinter_file_path) if sinter_file_path else None
+        metadata = {
+            "run_dates": list(run_dates),
+            "skipped_material_rows": 0,
+        }
+        if sinter_path:
+            metadata.update(
+                {
+                    "sinter_source_filename": sinter_path.name,
+                    "sinter_source_path": str(sinter_path.resolve()),
+                    "sinter_file_sha256": self._file_sha256(sinter_path),
+                }
+            )
 
         def writer(client: NeonClient, target: DatabaseTarget) -> int:
             material_codes = client.fetch_material_codes(
@@ -274,6 +303,7 @@ class RMStockService:
                 import_batch_id,
                 created_at,
             )
+            metadata["skipped_material_rows"] = skipped_count
 
             if skipped_count:
                 self.logger.warning(
@@ -307,10 +337,7 @@ class RMStockService:
                 source_path=str(source_path.resolve()),
                 file_sha256=source_hash,
                 row_count=len(target_df),
-                metadata={
-                    "run_dates": list(run_dates),
-                    "skipped_material_rows": skipped_count,
-                },
+                metadata=metadata,
                 schema=RM_STOCK_BATCH_SCHEMA,
                 table=RM_STOCK_BATCH_TABLE,
             )

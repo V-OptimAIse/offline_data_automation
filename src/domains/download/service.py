@@ -666,6 +666,25 @@ class PortalDownloader:
                 if m == "charge":
                     continue
 
+                if m == "rm_stock":
+                    parts = [
+                        self._safe_download(self.cfg.file_station_url, ["bulk", "stock"]),
+                        self._safe_download(self.cfg.file_station_url, ["dpr", "sp#2"]),
+                    ]
+                    paths = tuple(path for part in parts for path in part.paths)
+                    statuses = {part.status for part in parts}
+                    status = (
+                        "failed"
+                        if statuses == {"failed"}
+                        else "partial"
+                        if "failed" in statuses
+                        else "downloaded"
+                        if "downloaded" in statuses
+                        else "skipped"
+                    )
+                    outcomes[m] = DownloadOutcome(status=status, paths=paths)
+                    continue
+
                 keywords = mode_keywords.get(m)
                 if not keywords:
                     continue

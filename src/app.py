@@ -1,6 +1,7 @@
 # src/app.py
 import argparse
 from datetime import datetime, timedelta
+from fnmatch import fnmatch
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,13 +19,15 @@ from domains.rm_stock.service import RMStockService
 from domains.charge.service import ChargeService, ChargeServiceConfig
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+RM_STOCK_BULK_PATTERNS = ("RM BULK STOCK*",)
+RM_STOCK_SINTER_PATTERNS = ("*DPR SP#2*.xls*",)
 MODE_FILE_PATTERNS = {
     "rm": ("*BUNKER*.xlsx",),
     "fines_analysis": ("*BUNKER*.xlsx",),
     "dpr": ("*DPR*.xlsx",),
     "hot_metal": ("*HOT METAL*.xlsx",),
     "rm_hm": ("*RM & HM*.xlsx",),
-    "rm_stock": ("RM BULK STOCK*",),
+    "rm_stock": RM_STOCK_BULK_PATTERNS,
     "charge": ("CHARGE_AND_DUMP_REPORT_*.xlsx",),
 }
 
@@ -117,6 +120,16 @@ def _latest_existing_file(download_dir: Path, patterns: tuple[str, ...]) -> Path
     return max(files, key=lambda path: path.stat().st_mtime)
 
 
+def _latest_matching_file(files: list[Path], patterns: tuple[str, ...]) -> Path | None:
+    matches = [
+        path
+        for path in files
+        if path.is_file()
+        and any(fnmatch(path.name.lower(), pattern.lower()) for pattern in patterns)
+    ]
+    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
 def _downloaded_files_for_mode(
     mode: str,
     download_result: DownloadResult | None,
@@ -202,6 +215,39 @@ def _charge_source_files(
         return files
 
     return _downloaded_files_for_mode("charge", download_result, logger)
+
+
+def _rm_stock_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> tuple[Path | None, Path | None]:
+    downloaded = [] if skip_download else _downloaded_files_for_mode(
+        "rm_stock",
+        download_result,
+        logger,
+    )
+    if not skip_download and not downloaded:
+        return None, None
+
+    bulk_file = _latest_matching_file(downloaded, RM_STOCK_BULK_PATTERNS)
+    sinter_file = _latest_matching_file(downloaded, RM_STOCK_SINTER_PATTERNS)
+    bulk_file = bulk_file or _latest_existing_file(download_dir, RM_STOCK_BULK_PATTERNS)
+    sinter_file = sinter_file or _latest_existing_file(download_dir, RM_STOCK_SINTER_PATTERNS)
+
+    if bulk_file:
+        logger.info(f"rm_stock: using bulk stock source file: {bulk_file}")
+    else:
+        logger.warning("rm_stock: no RM BULK STOCK source file found")
+
+    if sinter_file:
+        logger.info(f"rm_stock: using sinter stock source file: {sinter_file}")
+    else:
+        logger.warning("rm_stock: no DPR SP#2 source file found; sinter stock skipped")
+
+    return bulk_file, sinter_file
 
 
 # -------------------------------------------------
@@ -378,8 +424,7 @@ def main():
     # RM STOCK
     # -------------------------------------------------
     if "rm_stock" in modes:
-        stock_file = _source_file_for_mode(
-            "rm_stock",
+        stock_file, sinter_stock_file = _rm_stock_source_files(
             skip_download=args.skip_download,
             download_dir=download_dir,
             download_result=download_result,
@@ -391,6 +436,7 @@ def main():
                 file_path=str(stock_file),
                 cfg=cfg,
                 run_dates=run_dates,
+                sinter_file_path=str(sinter_stock_file) if sinter_stock_file else None,
             )
 
     # -------------------------------------------------

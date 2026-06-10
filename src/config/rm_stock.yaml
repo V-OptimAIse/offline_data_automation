@@ -135,6 +135,7 @@ Quartzite: quartzite_mt
 # "G-1 TOTAL": g1_total_mt 
 # "G-2 TOTAL": g2_total_mt
 # "G-3 TOTAL": g3_total_mt
+Sinter Stock at Yard: g3_total_mt
 
 # ---------------- NEON/PI MATERIAL CODE MAPPING ----------------
 db_material_map:
@@ -204,3 +205,4 @@ db_material_map:
   # "G-1 TOTAL": sinter_1
   # "G-2 TOTAL": sinter_2
   # "G-3 TOTAL": sinter_3
+  Sinter Stock at Yard: sinter_3
