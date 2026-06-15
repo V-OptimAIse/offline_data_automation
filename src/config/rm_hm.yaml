@@ -1,11 +1,34 @@
 rm_hm:
-  influx:
-    measurement: rm_hm_data
+  run_date_format: "%d-%b-%Y"
 
-rm_hm_fields:
-  Date: date
-  TI: ti
-  AI: ai
-  RDI: rdi
-  RI: ri
+  neon:
+    schema: offline_feed
+    table: raw_material_strength_analysis
+    conflict_cols: [material_code, date_time]
+    upsert_mode: update_insert
+    material_master:
+      schema: plant_master
+      table: material_property_mapping
+      code_column: material_code
+      active_column:
 
+  sheets:
+    SP-01:
+      material_code: sinter_1
+      fields: &sinter_strength_fields
+        AI: property_1
+        TI: property_2
+        RDI: property_3
+        RI: property_4
+
+    SP-02:
+      material_code: sinter_3
+      fields: *sinter_strength_fields
+
+    COP product:
+      material_code: coke_1
+      fields:
+        M-40: property_1
+        M-10: property_2
+        CRI: property_3
+        CSR: property_4

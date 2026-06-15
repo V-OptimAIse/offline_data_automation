@@ -1,62 +1,155 @@
 # src/domains/rm_hm/service.py
 
+from __future__ import annotations
+
 import os
+import re
+from datetime import date, datetime
+from typing import Any
+
 import pandas as pd
-from datetime import datetime
+
 from core.logging import log_file_read
 from infrastructure.database_targets import (
     DatabaseTarget,
-    influx_write_enabled,
     write_to_database_targets,
 )
-from infrastructure.influx_client import InfluxClient
 from infrastructure.neon_client import NeonClient
 
 OUTPUT_DIR = "output/rm_hm"
+PROPERTY_COLS = [f"property_{i}" for i in range(1, 5)]
 
 
 class RMHMService:
-    """
-    Handles RM & HM combined sheet processing (e.g. SP-02).
-    """
+    """Processes raw-material strength sheets into generic material properties."""
 
     def __init__(self, logger, neon_cfg: dict | None = None, write_to_neon: bool = False):
         self.logger = logger
         self.neon_cfg = neon_cfg
         self.write_to_neon = write_to_neon
 
-    def _write_to_influx(self, df: pd.DataFrame, setting_cfg: dict) -> None:
-        if not influx_write_enabled(setting_cfg):
-            self.logger.info("InfluxDB disabled by write_db; skipping RM_HM Influx push")
-            return
+    @staticmethod
+    def _key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
 
-        influx_cfg = dict(setting_cfg.get("influxdb") or {})
-        token = os.getenv("INFLUX_TOKEN")
-        if token:
-            influx_cfg["token"] = token.strip().strip("\"'")
+    @staticmethod
+    def _date_series(values: pd.Series) -> pd.Series:
+        date_like = values.map(
+            lambda v: isinstance(v, (pd.Timestamp, datetime, date))
+            or bool(re.match(r"^\s*\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\s*$", str(v)))
+            or bool(re.match(r"^\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*$", str(v)))
+        )
+        return pd.to_datetime(values.where(date_like), errors="coerce", dayfirst=True)
 
-        if not all(influx_cfg.get(k) for k in ("url", "token", "org", "bucket")):
-            self.logger.warning("InfluxDB config missing or incomplete; skipping RM_HM Influx push")
-            return
+    def _sheet_name_map(self, xls: pd.ExcelFile) -> dict[str, str]:
+        return {self._key(sheet): sheet for sheet in xls.sheet_names}
 
-        fields = setting_cfg.get("rm_hm_fields", {})
-        cols = list(dict.fromkeys(fields.values()))
-        influx_df = df.rename(columns={"date_time": "date"})
-        influx_df = influx_df[[c for c in cols if c in influx_df.columns]].copy()
+    def _header_row(self, raw: pd.DataFrame, fields: dict[str, str]) -> int | None:
+        targets = {self._key(name) for name in fields}
+        scores = raw.head(25).apply(
+            lambda row: sum(self._key(value) in targets for value in row),
+            axis=1,
+        )
+        return int(scores.idxmax()) if int(scores.max()) else None
 
-        if influx_df.empty or "date" not in influx_df.columns:
-            self.logger.warning("RM_HM Influx fields/date missing; skipping Influx push")
-            return
+    def _date_column(self, data: pd.DataFrame, headers: list[Any]) -> int | None:
+        for idx, header in enumerate(headers):
+            if self._key(header) in {"date", "dates", "dt", "datetime"}:
+                return idx
 
-        measurement = setting_cfg.get("rm_hm", {}).get("influx", {}).get("measurement", "rm_hm")
-        client = InfluxClient(influx_cfg)
-        try:
-            client.write_dataframe(df=influx_df, measurement=measurement)
-            self.logger.info(f"RM_HM pushed to InfluxDB measurement: {measurement}")
-        except Exception:
-            self.logger.exception("RM_HM InfluxDB push failed")
-        finally:
-            client.close()
+        scores = {
+            idx: int(self._date_series(data.iloc[:, idx]).notna().sum())
+            for idx in data.columns
+        }
+        best_idx, best_score = max(scores.items(), key=lambda item: item[1])
+        return int(best_idx) if best_score else None
+
+    def _parse_sheet(
+        self,
+        xls: pd.ExcelFile,
+        sheet: str,
+        cfg: dict[str, Any],
+        run_dates: set[date],
+    ) -> pd.DataFrame:
+        log_file_read(self.logger, xls.io, domain="RM_HM", sheet=sheet)
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None).dropna(how="all")
+        if raw.empty:
+            self.logger.warning(f"RM_HM {sheet}: sheet is empty")
+            return pd.DataFrame()
+
+        fields = cfg.get("fields") or {}
+        header_idx = self._header_row(raw, fields)
+        if header_idx is None:
+            self.logger.warning(f"RM_HM {sheet}: property header row not found")
+            return pd.DataFrame()
+
+        headers = raw.loc[header_idx].tolist()
+        data = raw.loc[header_idx + 1:].reset_index(drop=True)
+        date_idx = self._date_column(data, headers)
+        if date_idx is None:
+            self.logger.warning(f"RM_HM {sheet}: date column not found")
+            return pd.DataFrame()
+
+        header_map = {self._key(header): idx for idx, header in enumerate(headers)}
+        out = pd.DataFrame(
+            {
+                "date_time": self._date_series(data.iloc[:, date_idx]),
+                "material_code": str(cfg["material_code"]).strip(),
+            }
+        )
+
+        for source, target in fields.items():
+            idx = header_map.get(self._key(source))
+            if idx is None:
+                self.logger.warning(f"RM_HM {sheet}: column {source!r} missing")
+                out[target] = pd.NA
+            else:
+                out[target] = pd.to_numeric(data.iloc[:, idx], errors="coerce")
+
+        out = out.dropna(subset=["date_time"]).sort_values("date_time")
+        out[PROPERTY_COLS] = out.reindex(columns=PROPERTY_COLS).ffill()
+        out = out[out["date_time"].dt.date.isin(run_dates)]
+        out = out.dropna(subset=PROPERTY_COLS, how="all")
+        return out[["date_time", "material_code", *PROPERTY_COLS]]
+
+    def _push_to_database_targets(self, df: pd.DataFrame, setting_cfg: dict) -> None:
+        rm_hm_cfg = setting_cfg.get("rm_hm", {})
+        neon_cfg = rm_hm_cfg.get("neon", {})
+        table_name = f"{neon_cfg.get('schema', 'offline_feed')}.{neon_cfg.get('table', 'raw_material_strength_analysis')}"
+        conflict_cols = neon_cfg.get("conflict_cols", ["material_code", "date_time"])
+        master_cfg = neon_cfg.get("material_master", {})
+
+        def writer(client: NeonClient, target: DatabaseTarget) -> int:
+            target_df = df.copy()
+            material_codes = client.fetch_material_codes(
+                schema=master_cfg.get("schema", "plant_master"),
+                table=master_cfg.get("table", "material_property_mapping"),
+                code_column=master_cfg.get("code_column", "material_code"),
+                active_column=master_cfg.get("active_column"),
+            )
+            if material_codes:
+                before = len(target_df)
+                target_df = target_df[
+                    target_df["material_code"].str.lower().isin(
+                        {code.lower() for code in material_codes}
+                    )
+                ]
+                if skipped := before - len(target_df):
+                    self.logger.warning(f"{target.label}: skipped {skipped} RM_HM rows with unknown material_code")
+
+            rows = client.insert_dataframe(
+                df=target_df,
+                table_name=table_name,
+                conflict_cols=conflict_cols,
+                upsert_mode=neon_cfg.get("upsert_mode", "update_insert"),
+            )
+            self.logger.info(f"{target.label} {table_name}: {rows} rows synced")
+            return rows
+
+        db_cfg = dict(setting_cfg)
+        if self.neon_cfg:
+            db_cfg["neon_developer"] = self.neon_cfg
+        write_to_database_targets(db_cfg, self.logger, "RM_HM", writer)
 
     def process(
         self,
@@ -64,159 +157,46 @@ class RMHMService:
         setting_cfg: dict,
         run_dates: list[str],
     ) -> pd.DataFrame | None:
-
         rm_hm_cfg = setting_cfg.get("rm_hm", {})
-        field_map = setting_cfg.get("rm_hm_fields", {})
+        sheet_cfgs = rm_hm_cfg.get("sheets", {})
+        run_fmt = rm_hm_cfg.get("run_date_format", "%d-%b-%Y")
+        requested_dates = {datetime.strptime(d, run_fmt).date() for d in run_dates}
 
-        sheet_name = rm_hm_cfg.get("sheet_name", "SP-02")
+        xls = pd.ExcelFile(rm_hm_file)
+        normalized_sheets = self._sheet_name_map(xls)
+        self.logger.info(f"Using RM_HM sheets: {', '.join(sheet_cfgs)}")
 
-        self.logger.info(f"Using RM & HM sheet: {sheet_name}")
+        parts = []
+        for configured_sheet, cfg in sheet_cfgs.items():
+            actual_sheet = normalized_sheets.get(self._key(configured_sheet))
+            if not actual_sheet:
+                self.logger.warning(f"RM_HM sheet missing: {configured_sheet!r}")
+                continue
+            part = self._parse_sheet(xls, actual_sheet, cfg, requested_dates)
+            if not part.empty:
+                parts.append(part)
+                self.logger.info(f"RM_HM {actual_sheet}: {len(part)} row(s)")
 
-        # ----------------------------
-        # READ SHEET
-        # ----------------------------
-        log_file_read(self.logger, rm_hm_file, domain="RM_HM", sheet=sheet_name)
-        df = pd.read_excel(
-            rm_hm_file,
-            sheet_name=sheet_name,
-            header=0,
+        if not parts:
+            self.logger.warning("No RM_HM data found for requested dates")
+            return None
+
+        filtered = (
+            pd.concat(parts, ignore_index=True)
+            .drop_duplicates(["date_time", "material_code"], keep="last")
+            .sort_values(["date_time", "material_code"])
+            .reset_index(drop=True)
         )
 
-        if df.empty:
-            self.logger.warning("RM & HM sheet is empty")
-            return None
-
-        # ----------------------------
-        # NORMALIZE COLUMNS
-        # ----------------------------
-        df.columns = (
-            df.columns.astype(str)
-            .str.strip()
-            .str.replace(r"\s+", "_", regex=True)
-            .str.replace(r"[^0-9a-zA-Z_]", "", regex=True)
-            .str.lower()
-        )
-
-        df = df.dropna(how="all")
-
-        # ----------------------------
-        # STANDARDIZE DATE COLUMN
-        # ----------------------------
-        date_col = None
-        for col in df.columns:
-            if col.lower() in {"date", "dates", "dt"}:
-                date_col = col
-                break
-
-        if not date_col:
-            self.logger.error(f"'date' column not found. Columns: {list(df.columns)}")
-            return None
-
-        df = df.rename(columns={date_col: "date"})
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-        df = df[df["date"].notna()]
-        df = df.sort_values("date").reset_index(drop=True)
-
-        # ----------------------------
-        # ENSURE KEY COLUMNS EXIST
-        # ----------------------------
-        target_cols = ["ai", "ti", "rdi", "ri"]
-        for col in target_cols:
-            if col not in df.columns:
-                self.logger.warning(f"Column '{col}' missing - creating empty column")
-                df[col] = pd.NA
-
-        # ----------------------------
-        # FORWARD FILL
-        # ----------------------------
-        df[target_cols] = df[target_cols].ffill().infer_objects(copy=False)
-
-        # ----------------------------
-        # FILTER BY RUN DATES
-        # ----------------------------
-        run_dt_list = [
-            datetime.strptime(d, "%d-%b-%Y").date()
-            for d in run_dates
-        ]
-
-        filtered = df[df["date"].dt.date.isin(run_dt_list)].copy()
-
-        if filtered.empty:
-            self.logger.warning("No RM & HM data found for requested dates")
-            return None
-
-        filtered["date"] = pd.to_datetime(filtered["date"])
-
-        # ----------------------------
-        # RENAME + SELECT COLUMNS
-        # ----------------------------
-        cols_to_keep = []
-
-        if field_map:
-            filtered = filtered.rename(columns=field_map)
-
-            cols_to_keep = list(field_map.values())
-
-        # always include date
-        if "date" in filtered.columns:
-            cols_to_keep.append("date")
-
-        # remove duplicates
-        cols_to_keep = list(set(cols_to_keep))
-
-        # keep only existing columns
-        cols_to_keep = [c for c in cols_to_keep if c in filtered.columns]
-
-        filtered = filtered[cols_to_keep]
-
-        # ----------------------------
-        # REQUIRED FOR NEON (date_time)
-        # ----------------------------
-        if "date" in filtered.columns:
-            filtered = filtered.rename(columns={"date": "date_time"})
-
-        # ----------------------------
-        # WRITE EXCEL
-        # ----------------------------
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         out_path = os.path.join(OUTPUT_DIR, "combined_rm_hm_data.xlsx")
         filtered.to_excel(out_path, index=False)
-
         self.logger.info(f"RM & HM output written -> {out_path}")
 
-        # ----------------------------
-        # WRITE TO CONFIGURED DB TARGETS
-        # ----------------------------
         if self.write_to_neon:
             try:
-                db_cfg = dict(setting_cfg)
-                if self.neon_cfg:
-                    db_cfg["neon_developer"] = self.neon_cfg
-
-                def writer(client: NeonClient, target: DatabaseTarget) -> int:
-                    rows = client.insert_dataframe(
-                        df=filtered,
-                        table_name="offline_feed.raw_material_strength_analysis",
-                        conflict_cols=["date_time"],
-                        upsert_mode="update_insert",
-                    )
-
-                    self.logger.info(
-                        f"Inserted {rows} rows to {target.label} "
-                        "-> offline_feed.raw_material_strength_analysis"
-                    )
-                    return rows
-
-                write_to_database_targets(
-                    db_cfg,
-                    self.logger,
-                    "RM_HM",
-                    writer,
-                )
-                self._write_to_influx(filtered, setting_cfg)
-
-            except Exception as e:
-                self.logger.error(f"Failed to write RM_HM data to DB targets: {e}")
+                self._push_to_database_targets(filtered, setting_cfg)
+            except Exception as exc:
+                self.logger.error(f"Failed to write RM_HM data to DB targets: {exc}")
 
         return filtered

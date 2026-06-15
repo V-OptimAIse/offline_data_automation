@@ -128,6 +128,7 @@ class RMStockService:
 
         all_results = []
         stock_rows = []
+        no_data_stock_rows = []
 
         for run_date in run_dates:
             self.logger.info(f"Processing RM STOCK for {run_date}")
@@ -141,8 +142,19 @@ class RMStockService:
 
             if sinter_file_path:
                 try:
+                    sinter_df = self.reader.read_sinter_stock(sinter_file_path, run_date)
+                    if sinter_df.empty:
+                        no_data_stock_rows.append(
+                            {
+                                "date_time": pd.to_datetime(ts),
+                                "material_key": self._map_material("Sinter Stock at Yard"),
+                                "db_material_code": self._map_db_material(
+                                    "Sinter Stock at Yard"
+                                ),
+                            }
+                        )
                     df = pd.concat(
-                        [df, self.reader.read_sinter_stock(sinter_file_path, run_date)],
+                        [df, sinter_df],
                         ignore_index=True,
                     )
                 except Exception as e:
@@ -155,7 +167,15 @@ class RMStockService:
             df["db_material_code"] = df["material"].apply(self._map_db_material)
 
             # Drop unmatched
-            df = df[df["material_key"].notna()]
+            df = df[df["material_key"].notna()].copy()
+
+            blank_stock = df["physical_stock"].isna()
+            if blank_stock.any():
+                self.logger.info(
+                    f"{run_date} RM STOCK skipped {int(blank_stock.sum())} "
+                    "mapped row(s) with blank physical_stock"
+                )
+                df = df[~blank_stock].copy()
 
             if df.empty:
                 self.logger.warning(f"No mapped data for {run_date}")
@@ -203,6 +223,22 @@ class RMStockService:
         # -------------------------------------------------
         if not all_results:
             self.logger.warning("No RM STOCK data processed")
+            if no_data_stock_rows:
+                self._push_to_database_targets(
+                    pd.DataFrame(
+                        columns=[
+                            "date_time",
+                            "material_key",
+                            "db_material_code",
+                            "stock_mt",
+                        ]
+                    ),
+                    cfg,
+                    file_path,
+                    run_dates,
+                    sinter_file_path,
+                    no_data_stock_rows=pd.DataFrame(no_data_stock_rows),
+                )
             return
 
         final_df = pd.concat(all_results, ignore_index=True)
@@ -220,6 +256,7 @@ class RMStockService:
             file_path,
             run_dates,
             sinter_file_path,
+            no_data_stock_rows=pd.DataFrame(no_data_stock_rows),
         )
 
     def _target_db_frame(self, df, material_codes, import_batch_id, created_at):
@@ -250,6 +287,10 @@ class RMStockService:
             return pd.DataFrame(columns=RM_STOCK_INSERT_COLS), skipped_count
 
         target_df["stock_mt"] = pd.to_numeric(target_df["stock_mt"], errors="coerce")
+        target_df = target_df.dropna(subset=["stock_mt"]).copy()
+        if target_df.empty:
+            return pd.DataFrame(columns=RM_STOCK_INSERT_COLS), skipped_count
+
         target_df = (
             target_df.groupby(["date_time", "material_code"], as_index=False, dropna=False)[
                 "stock_mt"
@@ -262,10 +303,45 @@ class RMStockService:
 
         return target_df[RM_STOCK_INSERT_COLS], skipped_count
 
+    def _target_delete_frame(self, df, material_codes):
+        if df is None or df.empty:
+            return pd.DataFrame(columns=RM_STOCK_CONFLICT_COLS)
+
+        material_codes_by_lower = {
+            str(code).lower(): code
+            for code in (material_codes or set())
+            if code
+        }
+        if not material_codes_by_lower:
+            return pd.DataFrame(columns=RM_STOCK_CONFLICT_COLS)
+
+        target_df = df.copy()
+        target_df["material_code"] = target_df.apply(
+            lambda row: self._resolve_material_code(
+                row["db_material_code"]
+                if "db_material_code" in row and pd.notna(row["db_material_code"])
+                else row["material_key"],
+                material_codes_by_lower,
+            ),
+            axis=1,
+        )
+        target_df["date_time"] = pd.to_datetime(target_df["date_time"], errors="coerce")
+        target_df = target_df.dropna(subset=RM_STOCK_CONFLICT_COLS)
+
+        return target_df[RM_STOCK_CONFLICT_COLS].drop_duplicates()
+
     # -------------------------------------------------
     # POSTGRES WRITER (NEON + PI)
     # -------------------------------------------------
-    def _push_to_database_targets(self, df, cfg, file_path, run_dates, sinter_file_path=None):
+    def _push_to_database_targets(
+        self,
+        df,
+        cfg,
+        file_path,
+        run_dates,
+        sinter_file_path=None,
+        no_data_stock_rows=None,
+    ):
         import_batch_id = str(uuid4())
         created_at = pd.Timestamp.now(tz="UTC")
         source_path = Path(file_path)
@@ -274,6 +350,7 @@ class RMStockService:
         metadata = {
             "run_dates": list(run_dates),
             "skipped_material_rows": 0,
+            "no_data_rows_deleted": 0,
         }
         if sinter_path:
             metadata.update(
@@ -303,7 +380,13 @@ class RMStockService:
                 import_batch_id,
                 created_at,
             )
-            metadata["skipped_material_rows"] = skipped_count
+            delete_df = self._target_delete_frame(no_data_stock_rows, material_codes)
+            batch_metadata = {
+                **metadata,
+                "skipped_material_rows": skipped_count,
+                "no_data_rows_to_delete": len(delete_df),
+                "no_data_rows_deleted": 0,
+            }
 
             if skipped_count:
                 self.logger.warning(
@@ -337,12 +420,24 @@ class RMStockService:
                 source_path=str(source_path.resolve()),
                 file_sha256=source_hash,
                 row_count=len(target_df),
-                metadata=metadata,
+                metadata=batch_metadata,
                 schema=RM_STOCK_BATCH_SCHEMA,
                 table=RM_STOCK_BATCH_TABLE,
             )
 
+            deleted_rows = 0
             try:
+                if not delete_df.empty:
+                    deleted_rows = client.delete_dataframe_keys(
+                        df=delete_df,
+                        table_name=RM_STOCK_TABLE_NAME,
+                        conflict_cols=RM_STOCK_CONFLICT_COLS,
+                    )
+                    self.logger.info(
+                        f"{target.label} {RM_STOCK_TABLE_NAME}: "
+                        f"{deleted_rows} no-data row(s) deleted"
+                    )
+
                 rows = client.insert_dataframe(
                     df=target_df,
                     table_name=RM_STOCK_TABLE_NAME,
@@ -365,6 +460,7 @@ class RMStockService:
                 status="succeeded",
                 row_count=rows,
                 error_count=0,
+                metadata={"no_data_rows_deleted": deleted_rows},
                 schema=RM_STOCK_BATCH_SCHEMA,
                 table=RM_STOCK_BATCH_TABLE,
             )

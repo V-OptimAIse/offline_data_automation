@@ -286,6 +286,62 @@ class NeonClient:
             execute_values(cur, query, values)
 
         return len(values)
+
+    def delete_dataframe_keys(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        conflict_cols: list[str],
+    ) -> int:
+        """
+        Delete rows from `table_name` using exact key rows from `df`.
+        """
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        missing_conflict_cols = [c for c in conflict_cols if c not in df.columns]
+        if missing_conflict_cols:
+            raise ValueError(
+                f"Missing conflict columns for {table_name}: {missing_conflict_cols}"
+            )
+
+        if "date_time" in df.columns:
+            df["date_time"] = pd.to_datetime(df["date_time"], errors="coerce")
+            if df["date_time"].dt.tz is None:
+                df["date_time"] = df["date_time"].dt.tz_localize("Asia/Kolkata")
+            df["date_time"] = df["date_time"].dt.tz_convert("UTC")
+
+        df = df.dropna(subset=conflict_cols)
+        df = df.drop_duplicates(subset=conflict_cols)
+        if df.empty:
+            return 0
+
+        table_sql = self._quote_qualified_name(table_name)
+        conflict_cols_sql = self._quote_columns(conflict_cols)
+        delete_conditions = " AND ".join(
+            f"t.{self._quote_identifier(c)} = v.{self._quote_identifier(c)}"
+            for c in conflict_cols
+        )
+        delete_template = "({})".format(
+            ", ".join(
+                "%s::timestamptz" if col == "date_time" else "%s"
+                for col in conflict_cols
+            )
+        )
+        delete_sql = f"""
+            DELETE FROM {table_sql} AS t
+            USING (VALUES %s) AS v ({conflict_cols_sql})
+            WHERE {delete_conditions}
+        """
+        values = [
+            tuple(self._sql_value(value) for value in row)
+            for row in df[conflict_cols].itertuples(index=False, name=None)
+        ]
+
+        with self.conn.cursor() as cur:
+            execute_values(cur, delete_sql, values, template=delete_template)
+            return max(cur.rowcount, 0)
     
 
     def write_hotmetal_dataframe(self, df: pd.DataFrame, source_file: str):

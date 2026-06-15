@@ -104,6 +104,13 @@ class RMStockReader:
             raise ValueError(f"Day {day} not found in sheet '{sheet_name}'")
 
         stock = pd.to_numeric(rows[stock_row][day_col], errors="coerce")
+        if pd.isna(stock) or stock <= 0:
+            self.logger.info(
+                f"No positive sinter stock value for {run_date} in sheet '{sheet_name}'; "
+                "skipping sinter stock row"
+            )
+            return pd.DataFrame(columns=["material", "physical_stock"])
+
         return pd.DataFrame(
             {"material": ["Sinter Stock at Yard"], "physical_stock": [stock]}
         )
