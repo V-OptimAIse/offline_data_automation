@@ -376,6 +376,48 @@ class PortalDownloader:
         matches.sort(key=lambda x: x[1], reverse=True)
         return matches[0][0]
 
+    def _find_latest_matching_file_in_grid(
+        self,
+        panel,
+        keywords: List[str],
+        max_pages: int = 60,
+    ):
+        seen_rows = set()
+        repeated_pages = 0
+
+        for page in range(max_pages):
+            rows = self._get_visible_rows(panel)
+            target = self._find_latest_matching_file(rows, keywords)
+            if target:
+                if page:
+                    self.logger.info(
+                        f"Required file found after paging File Station grid: {target['name']}"
+                    )
+                return target
+
+            row_keys = {
+                (str(row.get("name") or "").strip(), str(row.get("modified") or "").strip())
+                for row in rows
+                if str(row.get("name") or "").strip()
+            }
+            new_rows = row_keys - seen_rows
+            seen_rows.update(row_keys)
+            repeated_pages = repeated_pages + 1 if not new_rows else 0
+
+            if page == 0 or (page + 1) % 10 == 0:
+                self.logger.info(
+                    "Required file not visible yet; paging through File Station grid "
+                    f"({page + 1}/{max_pages})"
+                )
+
+            if panel is None or repeated_pages >= 3:
+                break
+
+            self._page_down_file_grid(panel)
+            time.sleep(0.6)
+
+        return None
+
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
     # -------------------------------------------------
@@ -416,7 +458,7 @@ class PortalDownloader:
             return DownloadOutcome(status="failed")
 
         self.logger.info(f"Finding required file using keywords: {keywords}")
-        target = self._find_latest_matching_file(rows, keywords)
+        target = self._find_latest_matching_file_in_grid(panel, keywords)
 
         if not target:
             self.logger.error(f"No file found for {keywords}")
