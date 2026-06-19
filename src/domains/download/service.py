@@ -27,6 +27,7 @@ class DownloadConfig:
     metadata_path: str
     file_station_url: str
     hourly_url: str
+    portal_files: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -356,9 +357,15 @@ class PortalDownloader:
     # -------------------------------------------------
     # FIND LATEST FILE
     # -------------------------------------------------
-    def _find_latest_matching_file(self, rows, keywords: List[str]):
+    def _find_latest_matching_file(
+        self,
+        rows,
+        keywords: List[str],
+        expected_name: str | None = None,
+    ):
         matches = []
         keyword_norms = [self._normalize_name(k) for k in keywords]
+        expected_norm = self._normalize_name(expected_name or "")
 
         for r in rows:
             name = self._normalize_name(r["name"])
@@ -366,7 +373,9 @@ class PortalDownloader:
             if not name.strip():
                 continue
 
-            if all(k in name for k in keyword_norms):
+            if (expected_norm and expected_norm in name) or all(
+                k in name for k in keyword_norms
+            ):
                 dt = _parse_dt(r["modified"]) or datetime.min
                 matches.append((r, dt))
 
@@ -380,6 +389,7 @@ class PortalDownloader:
         self,
         panel,
         keywords: List[str],
+        expected_name: str | None = None,
         max_pages: int = 60,
     ):
         seen_rows = set()
@@ -387,7 +397,7 @@ class PortalDownloader:
 
         for page in range(max_pages):
             rows = self._get_visible_rows(panel)
-            target = self._find_latest_matching_file(rows, keywords)
+            target = self._find_latest_matching_file(rows, keywords, expected_name)
             if target:
                 if page:
                     self.logger.info(
@@ -421,8 +431,14 @@ class PortalDownloader:
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
     # -------------------------------------------------
-    def _download_latest_file(self, url: str, keywords: List[str]) -> DownloadOutcome:
-        self.logger.info(f"Opening File Station for keyword search: {keywords}")
+    def _download_latest_file(
+        self,
+        url: str,
+        keywords: List[str],
+        expected_name: str | None = None,
+    ) -> DownloadOutcome:
+        search_label = expected_name or keywords
+        self.logger.info(f"Opening File Station for file search: {search_label}")
 
         self.sc.driver.get(url)
         self.sc.wait.until(
@@ -457,11 +473,20 @@ class PortalDownloader:
             self.logger.error("File list not loaded (timeout)")
             return DownloadOutcome(status="failed")
 
-        self.logger.info(f"Finding required file using keywords: {keywords}")
-        target = self._find_latest_matching_file_in_grid(panel, keywords)
+        self.logger.info(
+            f"Finding required file using expected name={expected_name!r}, "
+            f"keywords={keywords}"
+        )
+        target = self._find_latest_matching_file_in_grid(
+            panel,
+            keywords,
+            expected_name,
+        )
 
         if not target:
-            self.logger.error(f"No file found for {keywords}")
+            self.logger.error(
+                f"No file found for expected name={expected_name!r}, keywords={keywords}"
+            )
             return DownloadOutcome(status="failed")
 
         metadata = self._load_metadata()
@@ -483,13 +508,21 @@ class PortalDownloader:
             self.logger.error(f"Could not click file row: {target['name']}")
             return DownloadOutcome(status="failed", portal_name=target["name"])
 
-        downloaded_path = self._wait_for_download(start, name, keywords)
+        downloaded_path = self._wait_for_download(
+            start,
+            expected_name or name,
+            keywords,
+        )
         if not downloaded_path:
             self.logger.error("Download failed")
             return DownloadOutcome(status="failed", portal_name=target["name"])
 
-        downloaded_name = os.path.basename(downloaded_path).lower()
-        if not all(k in downloaded_name for k in keywords):
+        downloaded_name = os.path.basename(downloaded_path)
+        if not self._download_name_matches(
+            downloaded_name,
+            expected_name or name,
+            keywords,
+        ):
             self.logger.error("Downloaded file mismatch")
             return DownloadOutcome(status="failed", portal_name=target["name"])
 
@@ -507,12 +540,12 @@ class PortalDownloader:
     # -------------------------------------------------
     # RETRY WRAPPER
     # -------------------------------------------------
-    def _safe_download(self, url, keywords):
+    def _safe_download(self, url, keywords, expected_name: str | None = None):
         for attempt in range(3):
-            outcome = self._download_latest_file(url, keywords)
+            outcome = self._download_latest_file(url, keywords, expected_name)
             if outcome.status in ("downloaded", "skipped"):
                 return outcome
-            self.logger.warning(f"Retry {attempt+1}/3 for {keywords}")
+            self.logger.warning(f"Retry {attempt+1}/3 for {expected_name or keywords}")
             time.sleep(3)
         return DownloadOutcome(status="failed")
 
@@ -736,7 +769,11 @@ class PortalDownloader:
                     outcome = keyword_results[keyword_key]
                     self.logger.info(f"{m} uses the same portal file as an earlier mode")
                 else:
-                    outcome = self._safe_download(self.cfg.file_station_url, keywords)
+                    outcome = self._safe_download(
+                        self.cfg.file_station_url,
+                        keywords,
+                        (self.cfg.portal_files or {}).get(m),
+                    )
                     keyword_results[keyword_key] = outcome
 
                 outcomes[m] = outcome

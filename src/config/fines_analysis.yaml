@@ -94,6 +94,12 @@ fines_analysis:
       columns: A:AA
       header_row: 4
       sheet_name: LLOYDS FINES OVER SIZE
+    
+    LLOYDS_LOW_GRADE:
+      material_code: ore_12
+      columns: A:AA
+      header_row: 2
+      sheet_name: LLOYDS LOW GRADE
 
     BACHELI_FINES_OVERSIZE:
       material_code: ore_7

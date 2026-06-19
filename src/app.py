@@ -313,6 +313,7 @@ def main():
                 metadata_path=cfg["download"]["metadata_path"],
                 file_station_url=cfg["eml"]["file_station_url"],
                 hourly_url=cfg["eml"]["hourly_url"],
+                portal_files=cfg.get("portal_files", {}),
             ),
             logger,
         )

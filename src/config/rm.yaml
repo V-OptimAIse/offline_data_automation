@@ -264,6 +264,7 @@ rm:
     COKE:                     {col_prefix: COKE_,          columns: A:J, header_row: 2, sheet_name: LAM COKE}
     DOLOMITE:                 {col_prefix: FLUX_1_,        columns: A:L, header_row: 2, sheet_name: DOLOMITE}
     DONIMALAI OVER SIZE RTRN: {col_prefix: ORE_11_,        columns: A:R, header_row: 2, sheet_name: DONIMALAI CLO OSIZE}
+    LLOYDS LOW GRADE:         {col_prefix: ORE_12_,        columns: A:R, header_row: 2, sheet_name: LLOYDS LOW GRADE}
     GEOMIN_CLO:               {col_prefix: ORE_3_,         columns: A:S, header_row: 2, sheet_name: GEOMIN CLO}
     JRS_VENTURES:             {col_prefix: ORE_4_,         columns: A:S, header_row: 3, sheet_name: "JRS VENTURES "}
     LLOYDS_CLO:               {col_prefix: ORE_2_,         columns: A:R, header_row: 2, sheet_name: LLOYDS CLO}

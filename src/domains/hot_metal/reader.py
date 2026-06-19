@@ -3,15 +3,55 @@
 from datetime import datetime, timedelta, time
 import pandas as pd
 import re
-from openpyxl import load_workbook
-from openpyxl.utils import column_index_from_string
+import unicodedata
 
 from core.logging import log_file_read
+
+
+def _normalized_header_key(header: str) -> str:
+    text = unicodedata.normalize("NFKC", str(header or ""))
+    text = re.sub(r"\s+", " ", text).strip().upper()
+    text = re.sub(r"\s*\|\s*", "|", text)
+
+    left, sep, _ = text.partition("|")
+    compact_left = re.sub(r"\s+", "", left)
+
+    if compact_left in {"H.M.T.", "H.M.T", "HMT"}:
+        return "HMT"
+    if compact_left == "%SI":
+        return "CHEM_%SI"
+    if compact_left == "%S" and sep:
+        return "CHEM_%S"
+
+    return text
 
 
 class HotMetalReader:
     def __init__(self, logger):
         self.logger = logger
+
+    def _canonicalize_source_headers(self, columns, field_map: dict):
+        canonical_by_key = {
+            _normalized_header_key(source_header): source_header
+            for source_header in field_map
+        }
+
+        canonical_columns = [
+            canonical_by_key.get(_normalized_header_key(column), column)
+            for column in columns
+        ]
+
+        changed = [
+            f"{old!r} -> {new!r}"
+            for old, new in zip(columns, canonical_columns)
+            if old != new
+        ]
+        if changed:
+            self.logger.info(
+                "HOT_METAL normalized source headings: " + "; ".join(changed)
+            )
+
+        return canonical_columns
 
     def read_for_dates(self, file_path: str, run_dates, hm_cfg: dict) -> pd.DataFrame:
         log_file_read(self.logger, file_path, domain="HOT_METAL")
@@ -38,6 +78,10 @@ class HotMetalReader:
             for a, b in zip(h1, h2)
         ]
         cols = [c or f"COL_{i+1}" for i, c in enumerate(cols)]
+        cols = self._canonicalize_source_headers(
+            cols,
+            hm_cfg.get("hot_metal_fields", {}),
+        )
 
         df = xls.parse(sheet, header=None, usecols=usecols, skiprows=top + 1)
         df.columns = cols
