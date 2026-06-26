@@ -2,22 +2,30 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from shutil import which
+
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import os
-from shutil import which
-from selenium import webdriver
+from urllib3.exceptions import ReadTimeoutError
 
 
 @dataclass(frozen=True)
 class SeleniumConfig:
     default_timeout: int = 180
+    page_load_timeout: int = 90
+    script_timeout: int = 30
+    command_timeout: int | None = None
+    login_retries: int = 2
+
+    @property
+    def effective_command_timeout(self) -> int:
+        return self.command_timeout or max(self.default_timeout + 60, 240)
 
 
 class SeleniumClient:
@@ -30,13 +38,17 @@ class SeleniumClient:
         self.config = config
         self.driver = None
         self.wait = None
+        self._headless = False
 
     def start(self) -> None:
         chrome_options = Options()
+        self._headless = False
 
         # Common options
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.page_load_strategy = "eager"
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         chromium_path = which("chromium-browser")
@@ -47,6 +59,7 @@ class SeleniumClient:
             chrome_options.binary_location = chromium_path
             chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--window-size=1920,1080")
+            self._headless = True
 
             service = Service(chromedriver_path)
 
@@ -56,7 +69,38 @@ class SeleniumClient:
             service = Service(ChromeDriverManager().install())
 
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.wait = WebDriverWait(self.driver, self.config.default_timeout)
+        self._configure_timeouts()
+        self.wait = WebDriverWait(self.driver, self.config.default_timeout, poll_frequency=1)
+
+    def _configure_timeouts(self) -> None:
+        if not self.driver:
+            return
+
+        self._set_command_timeout(self.config.effective_command_timeout)
+        self.driver.set_page_load_timeout(self.config.page_load_timeout)
+        self.driver.set_script_timeout(self.config.script_timeout)
+
+    def _set_command_timeout(self, timeout: int) -> None:
+        if not self.driver:
+            return
+
+        command_executor = getattr(self.driver, "command_executor", None)
+        client_config = getattr(command_executor, "_client_config", None)
+        if client_config is not None:
+            client_config.timeout = timeout
+
+    def _prepare_window(self) -> None:
+        if not self.driver:
+            return
+
+        if self._headless:
+            self.driver.set_window_size(1920, 1080)
+            return
+
+        try:
+            self.driver.maximize_window()
+        except WebDriverException:
+            self.driver.set_window_size(1920, 1080)
 
 
 
@@ -65,9 +109,31 @@ class SeleniumClient:
         if not self.driver or not self.wait:
             raise RuntimeError("SeleniumClient not started. Call start() first.")
 
-        self.driver.maximize_window()
+        last_error = None
+        for attempt in range(1, self.config.login_retries + 1):
+            try:
+                self._login_once(login_url, user, password)
+                return
+            except (ReadTimeoutError, TimeoutException, WebDriverException) as exc:
+                last_error = exc
+                if attempt >= self.config.login_retries:
+                    break
+
+                self.stop()
+                time.sleep(2)
+                self.start()
+
+        raise RuntimeError(
+            "Portal login failed because Chrome/ChromeDriver stopped responding "
+            "or the username/password fields did not appear."
+        ) from last_error
+
+    def _login_once(self, login_url: str, user: str, password: str) -> None:
+        if not self.driver or not self.wait:
+            raise RuntimeError("SeleniumClient not started. Call start() first.")
+
+        self._prepare_window()
         self.driver.get(login_url)
-        self.wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
 
         # Same approach as your existing code. :contentReference[oaicite:7]{index=7}
         username_input = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@type='text']")))
@@ -83,6 +149,12 @@ class SeleniumClient:
 
     def stop(self) -> None:
         if self.driver:
-            self.driver.quit()
+            service = getattr(self.driver, "service", None)
+            self._set_command_timeout(10)
+            try:
+                self.driver.quit()
+            except Exception:
+                if service is not None:
+                    service.stop()
         self.driver = None
         self.wait = None
