@@ -18,7 +18,7 @@ from urllib3.exceptions import ReadTimeoutError
 @dataclass(frozen=True)
 class SeleniumConfig:
     default_timeout: int = 180
-    page_load_timeout: int = 90
+    page_load_timeout: int = 180
     script_timeout: int = 30
     command_timeout: int | None = None
     login_retries: int = 2

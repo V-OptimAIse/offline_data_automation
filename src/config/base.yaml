@@ -19,6 +19,7 @@ write_db: [ influx_db, pi_db, neon_db ]
 eml:
   login_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/"
   file_station_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/?launchApp=SYNO.SDS.App.FileStation3.Instance&SynoToken=laNlkmozfCC0g"
+  file_station_search_path: "/V-Optimaise Data/"
   hourly_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/index.cgi?launchApp=SYNO.SDS.App.FileStation3.Instance&launchParam=openfile%3D%252FV-Optimaise%2520Data%252FBF2%2520AUTO%2520REPORTS%252FCHARGE%2520AND%2520DUMP%252FHOURLY%252F"
 
 # This maps your CLI modes -> the visible file names inside portal.

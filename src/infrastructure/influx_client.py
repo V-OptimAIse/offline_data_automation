@@ -40,11 +40,11 @@ class InfluxClient:
         measurement: str,
         field_mapping: dict | None = None,
         tag_keys: list[str] | None = None,
-    ):
+    ) -> int:
         ts_col = self.timestamp_col
         if ts_col not in df.columns:
             logger.error(f"Timestamp column '{ts_col}' not found. Influx write skipped.")
-            return
+            return 0
 
         # Remove duplicate columns
         df = df.loc[:, ~df.columns.duplicated()].copy()
@@ -99,7 +99,7 @@ class InfluxClient:
 
         if not points:
             logger.warning("No valid points to write to InfluxDB")
-            return
+            return 0
 
         #  SINGLE BATCH WRITE (FIXES TIMEOUT)
         self.write_api.write(
@@ -117,3 +117,5 @@ class InfluxClient:
             logger.warning("Skipped columns:")
             for k in skipped:
                 logger.warning(f"  - {k}: all values NaN or invalid")
+
+        return len(points)

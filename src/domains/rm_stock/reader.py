@@ -1,3 +1,6 @@
+import re
+from datetime import date, datetime
+
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -7,6 +10,66 @@ from core.logging import log_file_read
 class RMStockReader:
     def __init__(self, logger):
         self.logger = logger
+
+    @staticmethod
+    def _normalize_cell(value) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+    @staticmethod
+    def _excel_column_name(index: int) -> str:
+        name = ""
+        index += 1
+        while index:
+            index, remainder = divmod(index - 1, 26)
+            name = f"{chr(65 + remainder)}{name}"
+        return name
+
+    def _find_header_row(self, df: pd.DataFrame) -> int:
+        for row_idx, row in df.head(20).iterrows():
+            labels = {self._normalize_cell(value) for value in row}
+            if "particulars" in labels and "physical stock" in labels:
+                return row_idx
+
+        raise ValueError(
+            "RM STOCK header row with PARTICULARS and Physical Stock not found"
+        )
+
+    def _find_column(self, df: pd.DataFrame, header_row: int, label: str) -> int:
+        expected = self._normalize_cell(label)
+        for col_idx, value in df.iloc[header_row].items():
+            if self._normalize_cell(value) == expected:
+                return col_idx
+
+        available = [
+            str(value).strip()
+            for value in df.iloc[header_row].tolist()
+            if value is not None and not pd.isna(value)
+        ]
+        raise ValueError(
+            f"RM STOCK column '{label}' not found. Header labels: {available}"
+        )
+
+    def _extract_timestamp(self, df: pd.DataFrame, run_date: str) -> pd.Timestamp:
+        for _, row in df.head(8).iterrows():
+            for value in row:
+                ts = None
+                if isinstance(value, pd.Timestamp):
+                    ts = value
+                elif isinstance(value, (datetime, date)):
+                    ts = pd.Timestamp(value)
+                elif isinstance(value, str) and value.strip():
+                    ts = pd.to_datetime(value, errors="coerce", dayfirst=True)
+
+                if ts is not None and pd.notna(ts) and 2000 <= ts.year <= 2100:
+                    return pd.Timestamp(ts)
+
+        self.logger.warning(
+            f"RM STOCK timestamp not found in sheet header for {run_date}; "
+            "using run date"
+        )
+        return pd.to_datetime(run_date, format="%d-%b-%Y")
 
     def _get_sheet_name(self, run_date: str) -> str:
         dt = pd.to_datetime(run_date, format="%d-%b-%Y")
@@ -33,30 +96,29 @@ class RMStockReader:
         self.logger.info(f"Reading sheet: {sheet_name}")
 
         try:
-            df = pd.read_excel(
-                file_path,
-                sheet_name=sheet_name,
-                usecols="B,T",
-                header=0,
-            )
+            raw_df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
         except ValueError:
             raise ValueError(f"Sheet '{sheet_name}' not found in file")
 
+        header_row = self._find_header_row(raw_df)
+        material_col = self._find_column(raw_df, header_row, "PARTICULARS")
+        stock_col = self._find_column(raw_df, header_row, "Physical Stock")
+
+        df = raw_df.iloc[header_row + 1:, [material_col, stock_col]].copy()
         df.columns = ["material", "physical_stock"]
 
-        # Clean
+        df = df[df["material"].notna()].copy()
         df["material"] = df["material"].astype(str).str.strip()
+        df = df[df["material"].ne("")].copy()
         df["physical_stock"] = pd.to_numeric(df["physical_stock"], errors="coerce")
-        df = df.dropna(subset=["material"])
 
-        # Read timestamp FROM SAME SHEET
-        ts = pd.read_excel(
-            file_path,
-            sheet_name=sheet_name,
-            usecols="S",
-            nrows=2,
-            header=None,
-        ).iloc[1, 0]
+        ts = self._extract_timestamp(raw_df, run_date)
+        self.logger.info(
+            "RM STOCK columns resolved: "
+            f"material={self._excel_column_name(material_col)}, "
+            f"physical_stock={self._excel_column_name(stock_col)}, "
+            f"non_blank_stock_rows={int(df['physical_stock'].notna().sum())}"
+        )
 
         return df, ts
 

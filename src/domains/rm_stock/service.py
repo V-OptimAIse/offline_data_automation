@@ -153,10 +153,13 @@ class RMStockService:
                                 ),
                             }
                         )
-                    df = pd.concat(
-                        [df, sinter_df],
-                        ignore_index=True,
-                    )
+                    elif df.empty:
+                        df = sinter_df
+                    else:
+                        df = pd.concat(
+                            [df, sinter_df],
+                            ignore_index=True,
+                        )
                 except Exception as e:
                     self.logger.warning(f"{run_date} sinter stock skipped: {e}")
 
@@ -249,7 +252,14 @@ class RMStockService:
         self.logger.info(f"Excel written -> {output_file}")
 
         self._write_to_influx(final_df, cfg)
-        stock_df = pd.concat(stock_rows, ignore_index=True)
+        stock_parts = [part for part in stock_rows if not part.empty]
+        stock_df = (
+            pd.concat(stock_parts, ignore_index=True)
+            if stock_parts
+            else pd.DataFrame(
+                columns=["date_time", "material_key", "db_material_code", "stock_mt"]
+            )
+        )
         self._push_to_database_targets(
             stock_df,
             cfg,
@@ -502,12 +512,17 @@ class RMStockService:
         client = InfluxClient(influx_cfg)
 
         try:
-            client.write_dataframe(
+            points_written = client.write_dataframe(
                 df=df,
                 measurement="rm_stock",
                 tag_keys=[],  
             )
-            self.logger.info("Data successfully written to InfluxDB")
+            if points_written:
+                self.logger.info(
+                    f"RM STOCK wrote {points_written} point(s) to InfluxDB"
+                )
+            else:
+                self.logger.info("No RM STOCK data written to InfluxDB")
 
         except Exception as e:
             self.logger.error(f"Influx write failed: {e}")

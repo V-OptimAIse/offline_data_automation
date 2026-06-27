@@ -27,6 +27,7 @@ class DownloadConfig:
     metadata_path: str
     file_station_url: str
     hourly_url: str
+    file_station_search_path: str | None = None
     portal_files: dict[str, str] | None = None
 
 
@@ -118,6 +119,18 @@ class PortalDownloader:
             .replace("  ", " ")
             .strip()
         )
+
+    def _normalize_file_station_path(self, folder_path: str | None) -> str | None:
+        if not folder_path or not folder_path.strip():
+            return None
+
+        normalized = folder_path.strip().replace("\\", "/")
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        if not normalized.endswith("/"):
+            normalized = f"{normalized}/"
+
+        return normalized
 
     def _wait_for_rows(self, root=None, timeout=15):
         for _ in range(timeout):
@@ -243,6 +256,262 @@ class PortalDownloader:
                     null;
             """)
         )
+
+    def _visible_row_signature(self, panel=None) -> tuple[str, ...]:
+        return tuple(
+            row["name"].strip()
+            for row in self._get_visible_rows(panel)
+            if row["name"].strip()
+        )[:8]
+
+    def _current_file_station_location(self) -> str:
+        return self.sc.driver.execute_script("""
+            function isVisible(el) {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 &&
+                    rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden';
+            }
+
+            function clean(text) {
+                return (text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+            }
+
+            const selected = [...document.querySelectorAll(
+                '.x-tree-selected, .x-tree-node-el.x-tree-selected'
+            )].find(isVisible);
+            if (selected) {
+                const selectedText = clean(selected.innerText || selected.textContent);
+                if (selectedText) {
+                    return selectedText;
+                }
+            }
+
+            const inputs = [...document.querySelectorAll('input')].filter(isVisible);
+            for (const input of inputs) {
+                const value = clean(input.value);
+                const placeholder = clean(input.getAttribute('placeholder')).toLowerCase();
+                if (value && !placeholder.includes('search') && value.toLowerCase() !== 'search') {
+                    return value;
+                }
+            }
+
+            return '';
+        """)
+
+    def _find_file_station_tree_item(self, folder_name: str):
+        return self.sc.wait.until(
+            lambda d: d.execute_script("""
+                const folderName = arguments[0];
+                const target = folderName.toLowerCase();
+
+                function isVisible(el) {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 &&
+                        rect.height > 0 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden';
+                }
+
+                function clean(text) {
+                    return (text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+                }
+
+                const candidates = [...document.querySelectorAll([
+                    '.x-tree-node-anchor span',
+                    '.x-tree-node-anchor',
+                    '.x-tree-node-el',
+                    '[role="treeitem"]'
+                ].join(','))]
+                    .filter(isVisible)
+                    .map(el => ({
+                        el,
+                        text: clean(el.innerText || el.textContent)
+                    }))
+                    .filter(item => item.text.toLowerCase() === target);
+
+                if (!candidates.length) {
+                    return null;
+                }
+
+                candidates.sort((a, b) => a.text.length - b.text.length);
+                const el = candidates[0].el;
+                return el.closest('.x-tree-node-el') ||
+                    el.closest('.x-tree-node-anchor') ||
+                    el;
+            """, folder_name)
+        )
+
+    def _click_element(self, el) -> bool:
+        metrics = self.sc.driver.execute_script("""
+            const el = arguments[0];
+            el.scrollIntoView({block: 'center', inline: 'nearest'});
+
+            const rect = el.getBoundingClientRect();
+            const left = Math.max(rect.left, 0);
+            const right = Math.min(rect.right, window.innerWidth);
+            const top = Math.max(rect.top, 0);
+            const bottom = Math.min(rect.bottom, window.innerHeight);
+            const width = right - left;
+            const height = bottom - top;
+
+            if (width < 3 || height < 3) {
+                return {visible: false, rect};
+            }
+
+            return {
+                visible: true,
+                x: Math.floor(left + width / 2),
+                y: Math.floor(top + height / 2),
+                rect
+            };
+        """, el)
+
+        if not metrics.get("visible"):
+            return False
+
+        x = metrics["x"]
+        y = metrics["y"]
+
+        try:
+            for event in (
+                {"type": "mouseMoved"},
+                {"type": "mousePressed", "button": "left", "clickCount": 1},
+                {"type": "mouseReleased", "button": "left", "clickCount": 1},
+            ):
+                self.sc.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    {"x": x, "y": y, **event},
+                )
+            return True
+        except (AttributeError, WebDriverException) as exc:
+            self.logger.warning(f"CDP click failed, using DOM fallback: {exc}")
+
+        return bool(
+            self.sc.driver.execute_script("""
+                const el = arguments[0];
+                for (const type of ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click']) {
+                    el.dispatchEvent(new MouseEvent(type, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        button: 0
+                    }));
+                }
+                return true;
+            """, el)
+        )
+
+    def _wait_for_file_station_folder(
+        self,
+        folder_name: str,
+        previous_signature: tuple[str, ...],
+    ):
+        target = self._normalize_name(folder_name)
+        return self.sc.wait.until(
+            lambda d: d.execute_script("""
+                const target = arguments[0];
+                const previousSignature = arguments[1] || [];
+
+                function isVisible(el) {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 &&
+                        rect.height > 0 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden';
+                }
+
+                function clean(text) {
+                    return (text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+                }
+
+                function normalize(text) {
+                    return clean(text).toLowerCase().replace(/&/g, 'and');
+                }
+
+                const selectedMatches = [...document.querySelectorAll(
+                    '.x-tree-selected, .x-tree-node-el.x-tree-selected'
+                )].some(el => isVisible(el) && normalize(el.innerText || el.textContent).includes(target));
+
+                const addressMatches = [...document.querySelectorAll('input')]
+                    .filter(isVisible)
+                    .some(input => normalize(input.value).includes(target));
+
+                const rows = [...document.querySelectorAll(
+                    '.x-grid3-body .x-grid3-row, .x-grid3-row'
+                )]
+                    .filter(isVisible)
+                    .map(row => {
+                        const cells = [...row.querySelectorAll('.x-grid3-cell-inner')];
+                        const nameCell = row.querySelector('.x-grid3-cell-inner.x-grid3-col-filename') ||
+                            cells[0] ||
+                            row;
+                        return clean(
+                            nameCell.getAttribute('ext:qtip') ||
+                            nameCell.innerText ||
+                            nameCell.textContent
+                        );
+                    })
+                    .filter(Boolean)
+                    .slice(0, 8);
+
+                const hasRows = rows.length > 0;
+                const sameRows = rows.length === previousSignature.length &&
+                    rows.every((name, index) => name === previousSignature[index]);
+
+                return (selectedMatches || addressMatches) && hasRows && !sameRows;
+            """, target, list(previous_signature))
+        )
+
+    def _select_file_station_folder(self, folder_path: str | None) -> bool:
+        normalized_path = self._normalize_file_station_path(folder_path)
+        if not normalized_path:
+            return True
+
+        folder_name = normalized_path.strip("/").split("/")[-1]
+        current_location = self._current_file_station_location()
+        if self._normalize_name(folder_name) in self._normalize_name(current_location):
+            self.logger.info(f"File Station already in folder: {normalized_path}")
+            return True
+
+        self.logger.info(f"Selecting File Station folder: {normalized_path}")
+
+        try:
+            panel = self._find_visible_file_grid_panel()
+            previous_signature = self._visible_row_signature(panel)
+        except Exception:
+            previous_signature = ()
+
+        try:
+            tree_item = self._find_file_station_tree_item(folder_name)
+        except Exception as exc:
+            self.logger.error(
+                f"File Station folder not found in tree: {folder_name}. Error: {exc}"
+            )
+            return False
+
+        if not tree_item:
+            self.logger.error(f"File Station folder not found in tree: {folder_name}")
+            return False
+
+        if not self._click_element(tree_item):
+            self.logger.error(f"Could not click File Station folder: {folder_name}")
+            return False
+
+        try:
+            self._wait_for_file_station_folder(folder_name, previous_signature)
+        except Exception as exc:
+            self.logger.error(
+                f"File Station folder did not load: {normalized_path}. Error: {exc}"
+            )
+            return False
+
+        self.logger.info(f"File Station folder selected: {normalized_path}")
+        return True
 
     def _click_grid_cell(self, cell, panel=None) -> bool:
         metrics = self.sc.driver.execute_script("""
@@ -448,6 +717,14 @@ class PortalDownloader:
 
         time.sleep(2)
 
+        self.sc.wait.until(
+            EC.presence_of_element_located((By.CLASS_NAME, "x-grid3-body"))
+        )
+        self.logger.info("File Station UI loaded")
+
+        if not self._select_file_station_folder(self.cfg.file_station_search_path):
+            return DownloadOutcome(status="failed")
+
         try:
             self.logger.info("Sorting File Station grid by Modified Date if available")
             self.sc.driver.find_element(
@@ -457,9 +734,6 @@ class PortalDownloader:
         except Exception:
             pass
 
-        self.sc.wait.until(
-            EC.presence_of_element_located((By.CLASS_NAME, "x-grid3-body"))
-        )
         self.logger.info("File Station grid is ready; reading visible rows")
 
         try:
@@ -727,6 +1001,12 @@ class PortalDownloader:
         outcomes: Dict[str, DownloadOutcome] = {}
 
         try:
+            search_path = self._normalize_file_station_path(
+                self.cfg.file_station_search_path
+            )
+            if search_path:
+                self.logger.info(f"Using File Station search folder: {search_path}")
+
             mode_keywords = {
                 "rm": ["bf-02", "bunker"],
                 "fines_analysis": ["bf-02", "bunker"],
