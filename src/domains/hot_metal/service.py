@@ -17,6 +17,9 @@ import pytz
 ist = pytz.timezone("Asia/Kolkata")
 
 OUTPUT_DIR = "output/hot_metal"
+HOT_METAL_TABLE = "offline_feed.hot_metal_slag_analysis"
+HOT_METAL_PRIMARY_KEY = "cast_no_ladle_spec"
+HOT_METAL_TEXT_COLUMNS = ("lab_sample_id", "cast_no_ladle_spec")
 
 
 class HotMetalService:
@@ -24,6 +27,51 @@ class HotMetalService:
         self.logger = logger
         self.reader = HotMetalReader(logger)
         self.updater = HotMetalConfigUpdater(logger)
+
+    def _clean_text_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        for col in HOT_METAL_TEXT_COLUMNS:
+            if col not in df.columns:
+                continue
+
+            values = df[col].astype("string").str.strip()
+            empty_like = values.isna() | values.str.lower().isin(
+                {"", "nan", "nat", "none"}
+            )
+            df[col] = values.mask(empty_like, pd.NA)
+
+        return df
+
+    def _prepare_db_dataframe(self, df: pd.DataFrame, run_date: str) -> pd.DataFrame:
+        db_df = df.rename(columns={"date": "date_time"}).copy()
+
+        if HOT_METAL_PRIMARY_KEY not in db_df.columns:
+            raise ValueError(
+                f"HOT_METAL primary key column missing: {HOT_METAL_PRIMARY_KEY}"
+            )
+
+        missing_key = db_df[HOT_METAL_PRIMARY_KEY].isna()
+        if missing_key.any():
+            self.logger.warning(
+                f"HOT_METAL {run_date}: dropping {int(missing_key.sum())} row(s) "
+                f"without {HOT_METAL_PRIMARY_KEY}"
+            )
+            db_df = db_df.loc[~missing_key].copy()
+
+        duplicate_key = db_df.duplicated(subset=[HOT_METAL_PRIMARY_KEY], keep=False)
+        if duplicate_key.any():
+            duplicate_values = sorted(
+                db_df.loc[duplicate_key, HOT_METAL_PRIMARY_KEY]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+            self.logger.warning(
+                f"HOT_METAL {run_date}: duplicate {HOT_METAL_PRIMARY_KEY} value(s) "
+                f"{duplicate_values}; keeping the last row for each key"
+            )
+            db_df = db_df.drop_duplicates(subset=[HOT_METAL_PRIMARY_KEY], keep="last")
+
+        return db_df
 
     def _write_to_influx(self, df: pd.DataFrame, setting_cfg: dict, hm_cfg: dict) -> None:
         if not influx_write_enabled(setting_cfg):
@@ -88,10 +136,7 @@ class HotMetalService:
 
             # df["date"] = pd.to_datetime(df["date"])  
 
-            # Convert tag columns to string
-            for col in ["lab_sample_id", "cast_no_ladle_spec"]:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).fillna("")
+            df = self._clean_text_columns(df)
 
             # Write Excel
             os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -116,19 +161,18 @@ class HotMetalService:
                 # Convert to numeric safely
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            # New target: offline_feed.hot_metal_slag_analysis (date column -> date_time)
-            db_df = df.rename(columns={"date": "date_time"})
+            db_df = self._prepare_db_dataframe(df, run_date)
 
             def writer(neon: NeonClient, target: DatabaseTarget) -> int:
                 rows = neon.insert_dataframe(
                     df=db_df,
-                    table_name="offline_feed.hot_metal_slag_analysis",
-                    conflict_cols=["lab_sample_id", "date_time"],
+                    table_name=HOT_METAL_TABLE,
+                    conflict_cols=[HOT_METAL_PRIMARY_KEY],
                     upsert_mode="update_insert",
                 )
                 self.logger.info(
                     f"HOT_METAL {run_date}: {rows} rows synced "
-                    f"to {target.label} -> offline_feed.hot_metal_slag_analysis"
+                    f"to {target.label} -> {HOT_METAL_TABLE}"
                 )
                 return rows
 
