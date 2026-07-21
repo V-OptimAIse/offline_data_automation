@@ -78,6 +78,7 @@ NMDC Limited (Donimalai): nmdc_donimalai_mt
 NMDC Limited (Kirandul) By Rake: nmdc_rom_mt
 NMDC Limited (Bachelli): nmdc_bachelli_mt
 NMDC Limited Lumps (10-150 MM) (Kirandul): nmdc_rom_lumps_kirandul_mt
+NMDC Limited Crushed ROM (10-40MM) (Kirandul): nmdc_rom_mt
 
 # ---------------- PRIVATE SUPPLIERS ----------------
 Gomti Infra and Mining Pvt Ltd: gomti_mt
@@ -121,6 +122,7 @@ EML Nut Coke: eml_nut_mt
 NUT Coke (Purchase): nut_coke_mt
 EVIAN REFRACTORIES: evian_mt
 INDIA COKE AND POWER PVT LTD: india_coke_power_mt
+INDIA COKE AND POWER PVT LTD (MV Nord Kudu): india_coke_power_mt
 NILANCHAL CARBO METALICKS: nilanchal_mt
 NILANCHAL CARBO METALICKS (Vizag): nilanchal_mt
 SUVIDHI ENERGY: suvidhi_mt
@@ -145,11 +147,10 @@ db_material_map:
 
   # ---------------- NMDC ----------------
   NMDC Limited (Donimalai): ore_1
-  "NMDC  Limited (Donimalai)": ore_1
   NMDC Limited (Kirandul) By Rake: ore_5
-  NMDC  Limited (Donimalai): ore_1
   NMDC Limited (Bachelli): ore_7
   NMDC Limited Lumps (10-150 MM) (Kirandul): ore_5
+  NMDC Limited Crushed ROM (10-40MM) (Kirandul): ore_5
 
   # ---------------- PRIVATE SUPPLIERS ----------------
   Gomti Infra and Mining Pvt Ltd: ore_10
@@ -193,6 +194,7 @@ db_material_map:
   NUT Coke (Purchase): nut_coke_1
   EVIAN REFRACTORIES: nut_coke_1
   INDIA COKE AND POWER PVT LTD: nut_coke_1
+  INDIA COKE AND POWER PVT LTD (MV Nord Kudu): nut_coke_1
   NILANCHAL CARBO METALICKS: nut_coke_1
   NILANCHAL CARBO METALICKS (Vizag): nut_coke_1
   SUVIDHI ENERGY: nut_coke_1

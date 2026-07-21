@@ -1,6 +1,7 @@
 from domains.rm_stock.reader import RMStockReader
 from domains.rm_stock.processor import RMStockProcessor
 from hashlib import sha256
+import re
 import pandas as pd
 from pathlib import Path
 from uuid import uuid4
@@ -39,63 +40,69 @@ class RMStockService:
         self.material_map = self._load_materials()
         self.db_material_map = self._load_db_materials()
 
-    # -------------------------------------------------
-    # LOAD MATERIAL MAPPING (YAML -> dict)
-    # -------------------------------------------------
-    def _load_materials(self):
+    @staticmethod
+    def _normalize_material_name(value) -> str:
+        if value is None:
+            return ""
+
+        text = re.sub(r"\s+", " ", str(value)).strip().lower()
+        text = re.sub(r"\s*-\s*(?=\()", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _normalize_mapping(cls, mapping: dict) -> dict[str, str]:
+        normalized = {}
+        for key, value in (mapping or {}).items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+
+            normalized_key = cls._normalize_material_name(key)
+            normalized_value = value.strip()
+            if normalized_key and normalized_value:
+                normalized[normalized_key] = normalized_value
+
+        return normalized
+
+    def _load_mapping_file(self):
         with open("src/config/rm_stock.yaml", "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
         if not isinstance(data, dict):
-            raise ValueError("rm_stock.yaml must be a dict (material -> key)")
+            raise ValueError("rm_stock.yaml must be a dict")
 
-        return {
-            k.strip().lower(): v.strip()
-            for k, v in data.items()
-            if isinstance(k, str) and isinstance(v, str) and k and v
+        return data
+
+    # -------------------------------------------------
+    # LOAD MATERIAL MAPPING (YAML -> dict)
+    # -------------------------------------------------
+    def _load_materials(self):
+        data = self._load_mapping_file()
+        material_data = {
+            key: value
+            for key, value in data.items()
+            if key != "db_material_map"
         }
+        return self._normalize_mapping(material_data)
 
     # -------------------------------------------------
     # LOAD DB MATERIAL MAPPING (YAML -> dict)
     # -------------------------------------------------
     def _load_db_materials(self):
-        with open("src/config/rm_stock.yaml", "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-
+        data = self._load_mapping_file()
         db_map = data.get("db_material_map") or {}
         if not isinstance(db_map, dict):
             raise ValueError("rm_stock.yaml db_material_map must be a dict")
 
-        return {
-            k.strip().lower(): v.strip()
-            for k, v in db_map.items()
-            if isinstance(k, str) and isinstance(v, str) and k and v
-        }
+        return self._normalize_mapping(db_map)
 
     # -------------------------------------------------
     # MAP RAW MATERIAL -> SHORT KEY
     # -------------------------------------------------
     def _map_material(self, material: str):
-        material = material.lower().strip()
-
-        for key, value in self.material_map.items():
-            if key in material:   # flexible match
-                return value
-
-        return None
+        return self.material_map.get(self._normalize_material_name(material))
 
     def _map_db_material(self, material: str):
-        material = material.lower().strip()
-
-        for key, value in sorted(
-            self.db_material_map.items(),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        ):
-            if key in material:
-                return value
-
-        return None
+        return self.db_material_map.get(self._normalize_material_name(material))
 
     @staticmethod
     def _material_code_candidates(material_key):

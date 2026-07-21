@@ -51,6 +51,14 @@ class RMStockReader:
             f"RM STOCK column '{label}' not found. Header labels: {available}"
         )
 
+    def _find_data_end_row(self, df: pd.DataFrame, header_row: int) -> int:
+        for row_idx, row in df.iloc[header_row + 1 :].iterrows():
+            labels = {self._normalize_cell(value) for value in row}
+            if "sinter plant" in labels:
+                return row_idx
+
+        return len(df)
+
     def _extract_timestamp(self, df: pd.DataFrame, run_date: str) -> pd.Timestamp:
         for _, row in df.head(8).iterrows():
             for value in row:
@@ -103,8 +111,9 @@ class RMStockReader:
         header_row = self._find_header_row(raw_df)
         material_col = self._find_column(raw_df, header_row, "PARTICULARS")
         stock_col = self._find_column(raw_df, header_row, "Physical Stock")
+        data_end_row = self._find_data_end_row(raw_df, header_row)
 
-        df = raw_df.iloc[header_row + 1:, [material_col, stock_col]].copy()
+        df = raw_df.iloc[header_row + 1:data_end_row, [material_col, stock_col]].copy()
         df.columns = ["material", "physical_stock"]
 
         df = df[df["material"].notna()].copy()
