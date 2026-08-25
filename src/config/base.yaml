@@ -31,6 +31,10 @@ portal_files:
   hot_metal: "06 BF-02- HOT METAL, SLAG & GAS"
   rm_hm: "RM & HM"
   rm_stock: "RM BULK STOCK"   
+  dust_basic: "12 BF-02 BUNKER  2026-27.xlsx"
+  dust_chemical: "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx"
+  # Rendered from each run date (for example: ASH ANALYSIS 26-27).
+  ash: "ASH ANALYSIS {financial_year_short}"
 
 
 influxdb:

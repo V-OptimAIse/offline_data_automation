@@ -15,6 +15,8 @@ Use the `--mode` argument with one or more comma-separated modes:
 - `rm_hm` - raw material and hot metal strength data
 - `rm_stock` - raw material physical stock
 - `charge` - charge and dump report processing
+- `dust` - BF2 dust basic and detailed chemical analysis
+- `ash` - coke, nut coke, and PCI ash chemical analysis
 
 `fines` is accepted as an alias for `fines_analysis`.
 
@@ -51,6 +53,8 @@ Important files:
 - `src/config/rm_hm.yaml` - RM and HM field mappings
 - `src/config/charge.yaml` - charge report target tables and batch metadata
 - `src/config/rm_stock.yaml` - stock material name mappings
+- `src/config/dust.yaml` - dust workbooks, BF2 filter, material codes, tables, and measurements
+- `src/config/ash.yaml` - ash sheet patterns, header mappings, material types, and target table
 
 Secrets should be provided through `.env` or `src/config/secrets.yaml`. Do not commit secrets.
 
@@ -79,6 +83,29 @@ Use existing downloaded files without opening the portal:
 ```powershell
 .\.venv\Scripts\python.exe src\app.py --mode rm_stock --today --skip-download
 ```
+
+Process both dust workbooks for a date or date range:
+
+```powershell
+.\.venv\Scripts\python.exe src\app.py --mode dust --rundate 05-08-2026 --skip-download
+```
+
+Without `--skip-download`, dust mode resolves both the shared BF-02 BUNKER
+workbook and the GCP/Dust Catcher chemical-analysis workbook. It processes only
+newly downloaded files; with `--skip-download`, it selects the latest matching
+local copy of each workbook.
+
+Process coke, nut coke, and PCI ash analysis from an existing workbook:
+
+```powershell
+.\.venv\Scripts\python.exe src\app.py --mode ash --rundate 31-07-2026 --skip-download
+```
+
+Without `--skip-download`, ash mode calculates the financial year from each run
+date and renders the portal filename template in `base.yaml` (for example,
+`ASH ANALYSIS 26-27`). Sheet names and Excel columns are discovered through the
+patterns in `ash.yaml`, so financial-year suffixes, spacing changes, and shifted
+columns do not require Python changes.
 
 `--skip` is also accepted as a short alias for `--skip-download`.
 
@@ -121,6 +148,8 @@ Common output locations:
 - `output/dpr`
 - `output/hot_metal`
 - `output/rm_hm`
+- `output/dust`
+- `output/ash`
 - `outputs` for charge reports
 
 ## Notes

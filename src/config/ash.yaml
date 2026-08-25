@@ -1,0 +1,51 @@
+ash:
+  run_date_format: "%d-%b-%Y"
+
+  # Sheet names are matched after removing punctuation and whitespace. This
+  # keeps the reader stable when the laboratory adds a financial-year suffix
+  # or changes spacing in a future workbook.
+  materials:
+    coke:
+      material_type: coke
+      sheet_patterns: ["*coke*prod*"]
+    nutcoke:
+      material_type: nutcoke
+      sheet_patterns: ["*nut*coke*"]
+    pci:
+      material_type: pci
+      sheet_patterns: ["*pci*"]
+
+  reader:
+    header_search_rows: 15
+    required_columns: [date, im, ash, vm, fc, sio2]
+
+    # Keys are ash_chemical_analysis column names. Values are normalized Excel
+    # header patterns; '*' allows material-specific wording such as
+    # "% S in Coke", "% S in Nut Coke", or "% S in PCI Coal".
+    column_map:
+      date: ["date"]
+      im: ["im"]
+      ash: ["ash"]
+      vm: ["vm"]
+      fc: ["fc"]
+      sio2: ["sio2"]
+      al2o3: ["al2o3"]
+      cao: ["cao"]
+      mgo: ["mgo"]
+      fe2o3: ["fe2o3"]
+      s_in_material: ["sin*"]
+      p_in_material: ["pin*"]
+      na2o: ["na2o*"]
+      k2o: ["k2o*"]
+      total_alkali_in_material: ["totalalk*"]
+      tio2: ["tio2"]
+
+  output:
+    dir: output/ash
+    filename: ash_chemical_analysis.xlsx
+
+  postgres:
+    schema: offline_feed
+    table: ash_chemical_analysis
+    conflict_cols: [material_type, date]
+    upsert_mode: update_insert

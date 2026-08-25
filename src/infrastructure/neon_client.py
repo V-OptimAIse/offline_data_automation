@@ -90,6 +90,7 @@ class NeonClient:
         table_name: str,
         conflict_cols: list[str] | None = None,
         upsert_mode: str = "update_insert",
+        null_non_positive_values: bool = True,
     ) -> int:
         """
         Upsert `df` into `table_name`.
@@ -98,6 +99,7 @@ class NeonClient:
                                       and never deletes existing data.
         upsert_mode="on_conflict"   - requires a UNIQUE/PK constraint on conflict_cols.
         upsert_mode="delete_insert" - deletes matching rows, then inserts.
+        null_non_positive_values=False preserves valid zero/negative payload values.
         Returns the number of rows processed.
         """
         # update_insert is the preferred rerun mode for ingestion jobs: it
@@ -133,10 +135,11 @@ class NeonClient:
         if df.empty:
             return 0
 
-        df = self._null_non_positive_payload_values(
-            df=df,
-            exclude_cols=set(conflict_cols),
-        )
+        if null_non_positive_values:
+            df = self._null_non_positive_payload_values(
+                df=df,
+                exclude_cols=set(conflict_cols),
+            )
 
         cols = list(df.columns)
         table_sql = self._quote_qualified_name(table_name)

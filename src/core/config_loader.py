@@ -95,6 +95,8 @@ def load_config(
     dpr_path: str = "src/config/dpr.yaml",
     hot_metal_path: str = "src/config/hot_metal.yaml",
     rm_hm_path: str = "src/config/rm_hm.yaml",
+    dust_path: str = "src/config/dust.yaml",
+    ash_path: str = "src/config/ash.yaml",
     env_path: str | Path = ".env",
 ):
     _load_env(env_path)
@@ -106,6 +108,8 @@ def load_config(
     dpr_file_cfg = load_yaml(dpr_path)
     hm_file_cfg = load_yaml(hot_metal_path)
     rm_hm_file_cfg = load_yaml(rm_hm_path)
+    dust_file_cfg = load_yaml(dust_path)
+    ash_file_cfg = load_yaml(ash_path)
 
     # Merge base + secrets
     merged = _deep_merge(base, secrets)
@@ -141,5 +145,15 @@ def load_config(
     # -----------------------------
     merged["rm_hm"] = rm_hm_file_cfg.get("rm_hm", {})
     merged["rm_hm_fields"] = rm_hm_file_cfg.get("rm_hm_fields", {})
+
+    # -----------------------------
+    # DUST ANALYSIS CONFIG
+    # -----------------------------
+    merged["dust"] = dust_file_cfg.get("dust", {})
+
+    # -----------------------------
+    # ASH ANALYSIS CONFIG
+    # -----------------------------
+    merged["ash"] = ash_file_cfg.get("ash", {})
 
     return _apply_database_url_overrides(_expand_env(merged))

@@ -8,7 +8,12 @@ from zoneinfo import ZoneInfo
 from core.config_loader import load_config
 from core.logging import configure_logging
 from infrastructure.selenium_client import SeleniumClient, SeleniumConfig
-from domains.download.service import PortalDownloader, DownloadConfig, DownloadResult
+from domains.download.service import (
+    DownloadConfig,
+    DownloadResult,
+    PortalDownloader,
+    format_portal_filename,
+)
 
 from domains.rm.service import RMService
 from domains.fines_analysis.service import FinesAnalysisService
@@ -17,10 +22,17 @@ from domains.hot_metal.service import HotMetalService
 from domains.rm_hm.service import RMHMService
 from domains.rm_stock.service import RMStockService
 from domains.charge.service import ChargeService, ChargeServiceConfig
+from domains.dust.service import DustService
+from domains.ash.service import AshService
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 RM_STOCK_BULK_PATTERNS = ("RM BULK STOCK*",)
 RM_STOCK_SINTER_PATTERNS = ("*DPR SP#2*.xls*",)
+DUST_BASIC_PATTERNS = ("*BUNKER*.xlsx",)
+DUST_CHEMICAL_PATTERNS = (
+    "*GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS*.xlsx",
+)
+ASH_PATTERNS = ("*ASH ANALYSIS*.xlsx",)
 MODE_FILE_PATTERNS = {
     "rm": ("*BUNKER*.xlsx",),
     "fines_analysis": ("*BUNKER*.xlsx",),
@@ -29,6 +41,7 @@ MODE_FILE_PATTERNS = {
     "rm_hm": ("*RM & HM*.xlsx",),
     "rm_stock": RM_STOCK_BULK_PATTERNS,
     "charge": ("CHARGE_AND_DUMP_REPORT_*.xlsx",),
+    "ash": ASH_PATTERNS,
 }
 
 
@@ -43,7 +56,7 @@ def parse_args():
         required=True,
         help=(
             "Comma separated modes. Supported: rm, fines_analysis, dpr, "
-            "hot_metal, rm_hm, rm_stock, charge"
+            "hot_metal, rm_hm, rm_stock, charge, dust, ash"
         ),
     )
 
@@ -250,6 +263,98 @@ def _rm_stock_source_files(
     return bulk_file, sinter_file
 
 
+def _dust_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> tuple[Path | None, Path | None]:
+    if skip_download:
+        basic_file = _latest_existing_file(download_dir, DUST_BASIC_PATTERNS)
+        chemical_file = _latest_existing_file(download_dir, DUST_CHEMICAL_PATTERNS)
+    else:
+        files = _downloaded_files_for_mode("dust", download_result, logger)
+        basic_file = _latest_matching_file(files, DUST_BASIC_PATTERNS)
+        chemical_file = _latest_matching_file(files, DUST_CHEMICAL_PATTERNS)
+
+    if basic_file:
+        logger.info(f"dust: using basic-analysis source file: {basic_file}")
+    else:
+        logger.info("dust: no basic-analysis source file selected")
+
+    if chemical_file:
+        logger.info(f"dust: using chemical-analysis source file: {chemical_file}")
+    else:
+        logger.info("dust: no chemical-analysis source file selected")
+
+    return basic_file, chemical_file
+
+
+def _ash_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    run_dates: list[str],
+    filename_template: str,
+    logger,
+) -> list[Path]:
+    if skip_download:
+        candidates = [
+            path
+            for pattern in ASH_PATTERNS
+            for path in download_dir.glob(pattern)
+            if path.is_file() and not path.name.startswith("~$")
+        ]
+        expected_names = tuple(
+            dict.fromkeys(
+                format_portal_filename(filename_template, run_date)
+                for run_date in run_dates
+            )
+        )
+        files = []
+        for expected_name in expected_names:
+            normalized_expected = _normalize_filename(expected_name)
+            matches = [
+                path
+                for path in candidates
+                if normalized_expected in _normalize_filename(path.name)
+            ]
+            if matches:
+                files.append(max(matches, key=lambda path: path.stat().st_mtime))
+
+        files = list(dict.fromkeys(files))
+        if not files and candidates:
+            fallback = max(candidates, key=lambda path: path.stat().st_mtime)
+            logger.warning(
+                "ash: no local filename matched the requested financial year; "
+                f"using latest keyword match: {fallback}"
+            )
+            files = [fallback]
+    else:
+        downloaded = _downloaded_files_for_mode("ash", download_result, logger)
+        files = [
+            path
+            for path in downloaded
+            if any(
+                fnmatch(path.name.lower(), pattern.lower())
+                for pattern in ASH_PATTERNS
+            )
+        ]
+
+    if files:
+        for path in files:
+            logger.info(f"ash: using source file: {path}")
+    else:
+        logger.warning("ash: no source file found; skipping read/DB write")
+    return files
+
+
+def _normalize_filename(value: str) -> str:
+    return "".join(character for character in str(value).casefold() if character.isalnum())
+
+
 # -------------------------------------------------
 # MAIN
 # -------------------------------------------------
@@ -277,6 +382,8 @@ def main():
         "rm_hm",
         "charge",
         "rm_stock",
+        "dust",
+        "ash",
     }
 
     invalid = set(modes) - valid_modes
@@ -479,6 +586,48 @@ def main():
             charge_service.run(
                 charge_file=str(charge_file),
                 run_date_str=run_date,
+            )
+
+    # -------------------------------------------------
+    # DUST ANALYSIS
+    # -------------------------------------------------
+    if "dust" in modes:
+        dust_basic_file, dust_chemical_file = _dust_source_files(
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if dust_basic_file or dust_chemical_file:
+            DustService(logger).process(
+                basic_file=str(dust_basic_file) if dust_basic_file else None,
+                chemical_file=(
+                    str(dust_chemical_file) if dust_chemical_file else None
+                ),
+                setting_cfg=cfg,
+                run_dates=run_dates,
+            )
+
+    # -------------------------------------------------
+    # ASH ANALYSIS
+    # -------------------------------------------------
+    if "ash" in modes:
+        ash_files = _ash_source_files(
+            skip_download=args.skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            run_dates=run_dates,
+            filename_template=(cfg.get("portal_files") or {}).get(
+                "ash",
+                "ASH ANALYSIS {financial_year_short}",
+            ),
+            logger=logger,
+        )
+        if ash_files:
+            AshService(logger).process(
+                file_paths=[str(path) for path in ash_files],
+                setting_cfg=cfg,
+                run_dates=run_dates,
             )
     logger.info("Offline data automation completed successfully.")
 

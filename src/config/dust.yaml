@@ -1,0 +1,75 @@
+dust:
+  record_columns:
+    date: date
+    material: material_code
+
+  output:
+    dir: output/dust
+    basic_filename: dust_basic_analysis.xlsx
+    chemical_filename: dust_chemical_analysis.xlsx
+
+  run_date_format: "%d-%b-%Y"
+
+  basic:
+    sheet_name: GCP & ALL DUST
+    date_column: A
+    first_data_row: 1
+    materials:
+      dust_catcher:
+        material_code: dust_1
+        columns: {fe_total: J, loi: K, ash: M, vm: N, fc: O}
+      gcp_dust:
+        material_code: dust_2
+        columns: {fe_total: C, loi: D, ash: F, vm: G, fc: H}
+
+  chemical:
+    row_filter:
+      field: plant
+      equals: BF2
+      normalizer: plant
+      drop_after_filter: true
+    header_row: 2
+    columns: B:T
+    column_map:
+      DoS: date
+      Plant: plant
+      "%Fe2O3": fe2o3
+      "%SiO2": sio2
+      "%Al2O3": al2o3
+      "%TiO2": tio2
+      "%MnO": mno
+      "%CaO": cao
+      "%MgO": mgo
+      "%Na2O": na2o
+      "%K2O": k2o
+      "%P2O5": p2o5
+      "%SO3": so3
+      "%Cr2O3": cr2o3
+      "%ZnO": zno
+      "%PbO": pbo
+      "%LoI": loi
+    sheets:
+      dust_catcher:
+        sheet_name: DUST CATCHER
+        material_code: dust_1
+      gcp_dust:
+        sheet_name: GCP DUST
+        material_code: dust_2
+
+  postgres:
+    schema: offline_feed
+    upsert_mode: update_insert
+    conflict_cols: [material_code, date]
+    tables:
+      basic: dust_basic_analysis
+      chemical: dust_chemical_analysis
+    material_master:
+      schema: plant_master
+      table: materials
+      code_column: material_code
+      active_column: is_active
+
+  influx:
+    measurements:
+      basic: dust_basic_analysis
+      chemical: dust_chemical_analysis

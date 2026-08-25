@@ -89,6 +89,39 @@ def _parse_dt(s: str | None) -> datetime | None:
     return None
 
 
+def format_portal_filename(template: str, run_date: str) -> str:
+    """Render a portal filename template using the run date's financial year."""
+    parsed = datetime.strptime(run_date, "%d-%b-%Y")
+    start_year = parsed.year if parsed.month >= 4 else parsed.year - 1
+    end_year = start_year + 1
+    return str(template).format(
+        year=parsed.year,
+        year_short=f"{parsed.year % 100:02d}",
+        financial_year=f"{start_year}-{end_year % 100:02d}",
+        financial_year_short=(
+            f"{start_year % 100:02d}-{end_year % 100:02d}"
+        ),
+        financial_year_start=start_year,
+        financial_year_end=end_year,
+    )
+
+
+def _combine_download_outcomes(parts: list[DownloadOutcome]) -> DownloadOutcome:
+    paths = tuple(dict.fromkeys(path for part in parts for path in part.paths))
+    statuses = {part.status for part in parts}
+
+    if statuses == {"downloaded"}:
+        status = "downloaded"
+    elif statuses == {"skipped"}:
+        status = "skipped"
+    elif statuses == {"failed"} or not paths:
+        status = "failed"
+    else:
+        status = "partial"
+
+    return DownloadOutcome(status=status, paths=paths)
+
+
 # -------------------------------------------------
 # DOWNLOADER
 # -------------------------------------------------
@@ -632,7 +665,8 @@ class PortalDownloader:
         keywords: List[str],
         expected_name: str | None = None,
     ):
-        matches = []
+        exact_matches = []
+        keyword_matches = []
         keyword_norms = [self._normalize_name(k) for k in keywords]
         expected_norm = self._normalize_name(expected_name or "")
 
@@ -642,12 +676,13 @@ class PortalDownloader:
             if not name.strip():
                 continue
 
-            if (expected_norm and expected_norm in name) or all(
-                k in name for k in keyword_norms
-            ):
-                dt = _parse_dt(r["modified"]) or datetime.min
-                matches.append((r, dt))
+            dt = _parse_dt(r["modified"]) or datetime.min
+            if expected_norm and expected_norm in name:
+                exact_matches.append((r, dt))
+            elif keyword_norms and all(k in name for k in keyword_norms):
+                keyword_matches.append((r, dt))
 
+        matches = exact_matches or keyword_matches
         if not matches:
             return None
 
@@ -663,10 +698,18 @@ class PortalDownloader:
     ):
         seen_rows = set()
         repeated_pages = 0
+        fallback_target = None
 
         for page in range(max_pages):
             rows = self._get_visible_rows(panel)
-            target = self._find_latest_matching_file(rows, keywords, expected_name)
+            if expected_name:
+                target = self._find_latest_matching_file(rows, [], expected_name)
+                fallback_target = fallback_target or self._find_latest_matching_file(
+                    rows,
+                    keywords,
+                )
+            else:
+                target = self._find_latest_matching_file(rows, keywords)
             if target:
                 if page:
                     self.logger.info(
@@ -695,7 +738,12 @@ class PortalDownloader:
             self._page_down_file_grid(panel)
             time.sleep(0.6)
 
-        return None
+        if fallback_target:
+            self.logger.warning(
+                f"Expected portal name {expected_name!r} was not found; "
+                f"using keyword match {fallback_target['name']!r}"
+            )
+        return fallback_target
 
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
@@ -1017,6 +1065,23 @@ class PortalDownloader:
             }
 
             keyword_results = {}
+
+            def cached_download(keywords: list[str], expected_name: str | None):
+                keyword_key = (*keywords, expected_name or "")
+                if keyword_key in keyword_results:
+                    self.logger.info(
+                        "Using the portal download already resolved for another mode"
+                    )
+                    return keyword_results[keyword_key]
+
+                outcome = self._safe_download(
+                    self.cfg.file_station_url,
+                    keywords,
+                    expected_name,
+                )
+                keyword_results[keyword_key] = outcome
+                return outcome
+
             for m in modes:
                 if m == "charge":
                     continue
@@ -1040,21 +1105,56 @@ class PortalDownloader:
                     outcomes[m] = DownloadOutcome(status=status, paths=paths)
                     continue
 
+                if m == "ash":
+                    template = (self.cfg.portal_files or {}).get(
+                        "ash",
+                        "ASH ANALYSIS {financial_year_short}",
+                    )
+                    expected_names = tuple(
+                        dict.fromkeys(
+                            format_portal_filename(template, run_date)
+                            for run_date in run_dates
+                        )
+                    )
+                    parts = [
+                        cached_download(["ash", "analysis"], expected_name)
+                        for expected_name in expected_names
+                    ]
+                    outcomes[m] = _combine_download_outcomes(parts)
+                    continue
+
+                if m == "dust":
+                    portal_files = self.cfg.portal_files or {}
+                    parts = [
+                        cached_download(
+                            ["bf-02", "bunker"],
+                            portal_files.get("dust_basic"),
+                        ),
+                        cached_download(
+                            [
+                                "gcp",
+                                "dust",
+                                "catcher",
+                                "esp",
+                                "grate",
+                                "bar",
+                                "sample",
+                                "analysis",
+                            ],
+                            portal_files.get("dust_chemical"),
+                        ),
+                    ]
+                    outcomes[m] = _combine_download_outcomes(parts)
+                    continue
+
                 keywords = mode_keywords.get(m)
                 if not keywords:
                     continue
 
-                keyword_key = tuple(keywords)
-                if keyword_key in keyword_results:
-                    outcome = keyword_results[keyword_key]
-                    self.logger.info(f"{m} uses the same portal file as an earlier mode")
-                else:
-                    outcome = self._safe_download(
-                        self.cfg.file_station_url,
-                        keywords,
-                        (self.cfg.portal_files or {}).get(m),
-                    )
-                    keyword_results[keyword_key] = outcome
+                outcome = cached_download(
+                    keywords,
+                    (self.cfg.portal_files or {}).get(m),
+                )
 
                 outcomes[m] = outcome
                 if outcome.status == "failed":
