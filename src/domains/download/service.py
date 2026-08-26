@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,7 +11,11 @@ from pathlib import Path
 from typing import Dict, Set, List
 from zoneinfo import ZoneInfo
 
-from selenium.common.exceptions import MoveTargetOutOfBoundsException, WebDriverException
+from selenium.common.exceptions import (
+    MoveTargetOutOfBoundsException,
+    StaleElementReferenceException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -144,13 +150,38 @@ class PortalDownloader:
         with open(self.cfg.metadata_path, "w") as f:
             json.dump(data, f, indent=2)
 
+    @staticmethod
+    def _clean_portal_text(value: str | None) -> str:
+        """Decode portal labels and collapse whitespace without changing the filename."""
+        text = str(value or "")
+        # Synology may expose an already encoded ext:qtip value (for example
+        # ``RM &amp; HM.xlsx``). Decode repeatedly to also tolerate nested encoding.
+        for _ in range(3):
+            decoded = html.unescape(text)
+            if decoded == text:
+                break
+            text = decoded
+        return " ".join(text.replace("\xa0", " ").split())
+
     def _normalize_name(self, name: str):
-        return (
-            name.lower()
-            .replace("&", "and")
-            .replace("\xa0", " ")
-            .replace("  ", " ")
-            .strip()
+        normalized = self._clean_portal_text(name).casefold().replace("&", " and ")
+        return " ".join(normalized.split())
+
+    def _name_contains_identifier(self, name: str, identifier: str) -> bool:
+        """Match a stable filename identifier despite punctuation or suffix changes."""
+        name_norm = self._normalize_name(name)
+        identifier_norm = self._normalize_name(identifier)
+        if not identifier_norm:
+            return False
+        if identifier_norm in name_norm:
+            return True
+
+        name_tokens = re.findall(r"[a-z0-9]+", name_norm)
+        identifier_tokens = re.findall(r"[a-z0-9]+", identifier_norm)
+        width = len(identifier_tokens)
+        return bool(width) and any(
+            name_tokens[index : index + width] == identifier_tokens
+            for index in range(len(name_tokens) - width + 1)
         )
 
     def _normalize_file_station_path(self, folder_path: str | None) -> str | None:
@@ -185,7 +216,7 @@ class PortalDownloader:
         filename_norm = self._normalize_name(filename)
         expected_norm = self._normalize_name(expected_name)
 
-        if expected_norm and expected_norm in filename_norm:
+        if expected_norm and self._name_contains_identifier(filename, expected_name):
             return True
 
         expected_stem = os.path.splitext(expected_norm)[0]
@@ -194,8 +225,10 @@ class PortalDownloader:
             return True
 
         if keywords:
-            keyword_norms = [self._normalize_name(k) for k in keywords]
-            return all(k in filename_norm for k in keyword_norms)
+            return all(
+                self._name_contains_identifier(filename, keyword)
+                for keyword in keywords
+            )
 
         return False
 
@@ -240,7 +273,7 @@ class PortalDownloader:
     # GET ROWS
     # -------------------------------------------------
     def _get_visible_rows(self, root=None):
-        return self.sc.driver.execute_script("""
+        rows = self.sc.driver.execute_script("""
             const root = arguments[0] || document;
             const rows = [...root.querySelectorAll('.x-grid3-body .x-grid3-row, .x-grid3-row')];
 
@@ -262,6 +295,10 @@ class PortalDownloader:
                 };
             }).filter(r => r.name || r.modified);
         """, root)
+        for row in rows:
+            row["name"] = self._clean_portal_text(row.get("name"))
+            row["modified"] = self._clean_portal_text(row.get("modified"))
+        return rows
 
     def _find_visible_file_grid_panel(self):
         return self.sc.wait.until(
@@ -547,39 +584,45 @@ class PortalDownloader:
         return True
 
     def _click_grid_cell(self, cell, panel=None) -> bool:
-        metrics = self.sc.driver.execute_script("""
-            const el = arguments[0];
-            const panel = arguments[1];
+        try:
+            metrics = self.sc.driver.execute_script("""
+                const el = arguments[0];
+                const panel = arguments[1];
 
-            el.scrollIntoView({block: 'center', inline: 'nearest'});
+                el.scrollIntoView({block: 'center', inline: 'nearest'});
 
-            const rect = el.getBoundingClientRect();
-            const panelRect = panel ? panel.getBoundingClientRect() : {
-                left: 0,
-                top: 0,
-                right: window.innerWidth,
-                bottom: window.innerHeight
-            };
+                const rect = el.getBoundingClientRect();
+                const panelRect = panel ? panel.getBoundingClientRect() : {
+                    left: 0,
+                    top: 0,
+                    right: window.innerWidth,
+                    bottom: window.innerHeight
+                };
 
-            const left = Math.max(rect.left, panelRect.left, 0);
-            const right = Math.min(rect.right, panelRect.right, window.innerWidth);
-            const top = Math.max(rect.top, panelRect.top, 0);
-            const bottom = Math.min(rect.bottom, panelRect.bottom, window.innerHeight);
-            const width = right - left;
-            const height = bottom - top;
+                const left = Math.max(rect.left, panelRect.left, 0);
+                const right = Math.min(rect.right, panelRect.right, window.innerWidth);
+                const top = Math.max(rect.top, panelRect.top, 0);
+                const bottom = Math.min(rect.bottom, panelRect.bottom, window.innerHeight);
+                const width = right - left;
+                const height = bottom - top;
 
-            if (width < 3 || height < 3) {
-                return {visible: false, rect, panelRect};
-            }
+                if (width < 3 || height < 3) {
+                    return {visible: false, rect, panelRect};
+                }
 
-            return {
-                visible: true,
-                x: Math.floor(left + Math.min(24, width / 2)),
-                y: Math.floor(top + height / 2),
-                rect,
-                panelRect
-            };
-        """, cell, panel)
+                return {
+                    visible: true,
+                    x: Math.floor(left + Math.min(24, width / 2)),
+                    y: Math.floor(top + height / 2),
+                    rect,
+                    panelRect
+                };
+            """, cell, panel)
+        except StaleElementReferenceException:
+            self.logger.warning(
+                "File Station row changed before it could be clicked; retrying with a fresh row"
+            )
+            return False
 
         if not metrics.get("visible"):
             return False
@@ -625,6 +668,21 @@ class PortalDownloader:
             """, cell)
         )
 
+    def _find_visible_row_by_identity(self, panel, target):
+        """Return a fresh DOM row for a previously selected portal file."""
+        target_name = self._normalize_name(target.get("name") or "")
+        target_modified = self._clean_portal_text(target.get("modified"))
+        for row in self._get_visible_rows(panel):
+            if self._normalize_name(row.get("name") or "") != target_name:
+                continue
+            if (
+                target_modified
+                and self._clean_portal_text(row.get("modified")) != target_modified
+            ):
+                continue
+            return row
+        return None
+
     def _page_down_file_grid(self, panel) -> None:
         focus_el = self.sc.driver.execute_script("""
             const panel = arguments[0];
@@ -656,6 +714,57 @@ class PortalDownloader:
                 }
             """, focus_el)
 
+    def _rewind_file_grid(self, panel) -> None:
+        focus_el = self.sc.driver.execute_script("""
+            const panel = arguments[0];
+            const focusEl = panel.querySelector('.x-grid3-focus') || panel;
+            panel.scrollTop = 0;
+            focusEl.focus({preventScroll: true});
+            panel.dispatchEvent(new WheelEvent('wheel', {
+                deltaY: -100000,
+                bubbles: true,
+                cancelable: true,
+                view: window
+            }));
+            return focusEl;
+        """, panel)
+        try:
+            focus_el.send_keys(Keys.HOME)
+        except WebDriverException:
+            self.sc.driver.execute_script("""
+                const target = arguments[0];
+                for (const type of ['keydown', 'keyup']) {
+                    target.dispatchEvent(new KeyboardEvent(type, {
+                        key: 'Home',
+                        code: 'Home',
+                        keyCode: 36,
+                        which: 36,
+                        bubbles: true,
+                        cancelable: true
+                    }));
+                }
+            """, focus_el)
+        time.sleep(0.6)
+
+    def _restore_grid_row(self, panel, target, max_pages: int = 60):
+        """Re-find a fallback row after virtual-grid paging invalidated its DOM node."""
+        self._rewind_file_grid(panel)
+        seen_signatures = set()
+
+        for _ in range(max_pages):
+            fresh_target = self._find_visible_row_by_identity(panel, target)
+            if fresh_target:
+                return fresh_target
+
+            signature = self._visible_row_signature(panel)
+            if signature in seen_signatures:
+                break
+            seen_signatures.add(signature)
+            self._page_down_file_grid(panel)
+            time.sleep(0.6)
+
+        return None
+
     # -------------------------------------------------
     # FIND LATEST FILE
     # -------------------------------------------------
@@ -667,7 +776,6 @@ class PortalDownloader:
     ):
         exact_matches = []
         keyword_matches = []
-        keyword_norms = [self._normalize_name(k) for k in keywords]
         expected_norm = self._normalize_name(expected_name or "")
 
         for r in rows:
@@ -677,9 +785,13 @@ class PortalDownloader:
                 continue
 
             dt = _parse_dt(r["modified"]) or datetime.min
-            if expected_norm and expected_norm in name:
+            if expected_norm and self._name_contains_identifier(
+                r["name"], expected_name or ""
+            ):
                 exact_matches.append((r, dt))
-            elif keyword_norms and all(k in name for k in keyword_norms):
+            elif keywords and all(
+                self._name_contains_identifier(r["name"], keyword) for keyword in keywords
+            ):
                 keyword_matches.append((r, dt))
 
         matches = exact_matches or keyword_matches
@@ -704,10 +816,14 @@ class PortalDownloader:
             rows = self._get_visible_rows(panel)
             if expected_name:
                 target = self._find_latest_matching_file(rows, [], expected_name)
-                fallback_target = fallback_target or self._find_latest_matching_file(
-                    rows,
-                    keywords,
-                )
+                if fallback_target is None:
+                    fallback = self._find_latest_matching_file(rows, keywords)
+                    if fallback:
+                        # Do not retain Selenium elements while paging a virtual grid.
+                        fallback_target = {
+                            "name": fallback["name"],
+                            "modified": fallback["modified"],
+                        }
             else:
                 target = self._find_latest_matching_file(rows, keywords)
             if target:
@@ -740,10 +856,16 @@ class PortalDownloader:
 
         if fallback_target:
             self.logger.warning(
-                f"Expected portal name {expected_name!r} was not found; "
+                f"Configured portal identifier {expected_name!r} was not found; "
                 f"using keyword match {fallback_target['name']!r}"
             )
-        return fallback_target
+            restored_target = self._restore_grid_row(panel, fallback_target)
+            if not restored_target:
+                self.logger.error(
+                    f"Could not restore keyword-matched row: {fallback_target['name']}"
+                )
+            return restored_target
+        return None
 
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
@@ -796,7 +918,7 @@ class PortalDownloader:
             return DownloadOutcome(status="failed")
 
         self.logger.info(
-            f"Finding required file using expected name={expected_name!r}, "
+            f"Finding required file using identifier={expected_name!r}, "
             f"keywords={keywords}"
         )
         target = self._find_latest_matching_file_in_grid(
@@ -807,7 +929,7 @@ class PortalDownloader:
 
         if not target:
             self.logger.error(
-                f"No file found for expected name={expected_name!r}, keywords={keywords}"
+                f"No file found for identifier={expected_name!r}, keywords={keywords}"
             )
             return DownloadOutcome(status="failed")
 
@@ -823,12 +945,16 @@ class PortalDownloader:
             self.logger.info(f"SKIPPED (no change): {name}")
             return DownloadOutcome(status="skipped", portal_name=target["name"])
 
-        self.logger.info(f"Starting browser download: {target['name']}")
+        self.logger.info(f"Preparing browser download: {target['name']}")
 
         start = time.time()
+        fresh_target = self._find_visible_row_by_identity(panel, target)
+        if fresh_target:
+            target = fresh_target
         if not self._click_grid_cell(target.get("cell") or target["el"], panel):
             self.logger.error(f"Could not click file row: {target['name']}")
             return DownloadOutcome(status="failed", portal_name=target["name"])
+        self.logger.info(f"Browser download initiated: {target['name']}")
 
         downloaded_path = self._wait_for_download(
             start,
@@ -863,12 +989,22 @@ class PortalDownloader:
     # RETRY WRAPPER
     # -------------------------------------------------
     def _safe_download(self, url, keywords, expected_name: str | None = None):
-        for attempt in range(3):
-            outcome = self._download_latest_file(url, keywords, expected_name)
+        for attempt in range(1, 4):
+            try:
+                outcome = self._download_latest_file(url, keywords, expected_name)
+            except WebDriverException as exc:
+                self.logger.warning(
+                    "Browser download attempt failed "
+                    f"({attempt}/3) for {expected_name or keywords}: {exc}"
+                )
+                outcome = DownloadOutcome(status="failed")
             if outcome.status in ("downloaded", "skipped"):
                 return outcome
-            self.logger.warning(f"Retry {attempt+1}/3 for {expected_name or keywords}")
-            time.sleep(3)
+            if attempt < 3:
+                self.logger.warning(
+                    f"Retrying download ({attempt + 1}/3) for {expected_name or keywords}"
+                )
+                time.sleep(3)
         return DownloadOutcome(status="failed")
 
     def _charge_name_matches(self, name: str, stem: str) -> bool:
@@ -1087,9 +1223,18 @@ class PortalDownloader:
                     continue
 
                 if m == "rm_stock":
+                    portal_files = self.cfg.portal_files or {}
                     parts = [
-                        self._safe_download(self.cfg.file_station_url, ["bulk", "stock"]),
-                        self._safe_download(self.cfg.file_station_url, ["dpr", "sp#2"]),
+                        self._safe_download(
+                            self.cfg.file_station_url,
+                            ["bulk", "stock"],
+                            portal_files.get("rm_stock"),
+                        ),
+                        self._safe_download(
+                            self.cfg.file_station_url,
+                            ["dpr", "sp#2"],
+                            portal_files.get("rm_stock_sinter"),
+                        ),
                     ]
                     paths = tuple(path for part in parts for path in part.paths)
                     statuses = {part.status for part in parts}

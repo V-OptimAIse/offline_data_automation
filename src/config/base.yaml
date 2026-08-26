@@ -22,19 +22,19 @@ eml:
   file_station_search_path: "/V-Optimaise Data/"
   hourly_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/index.cgi?launchApp=SYNO.SDS.App.FileStation3.Instance&launchParam=openfile%3D%252FV-Optimaise%2520Data%252FBF2%2520AUTO%2520REPORTS%252FCHARGE%2520AND%2520DUMP%252FHOURLY%252F"
 
-# This maps your CLI modes -> the visible file names inside portal.
-# Matches your existing mode_map. :contentReference[oaicite:4]{index=4}
+# Stable identifiers used to find portal files. Text after these identifiers
+# (financial year, month, revision, and extension) may change freely.
 portal_files:
-  rm: "12 BF-02 BUNKER  2026-27.xlsx"
-  fines_analysis: "12 BF-02 BUNKER  2026-27.xlsx"
+  rm: "BF-02 BUNKER"
+  fines_analysis: "BF-02 BUNKER"
   dpr: "BF-02 DPR"
-  hot_metal: "06 BF-02- HOT METAL, SLAG & GAS"
+  hot_metal: "BF-02- HOT METAL, SLAG"
   rm_hm: "RM & HM"
-  rm_stock: "RM BULK STOCK"   
-  dust_basic: "12 BF-02 BUNKER  2026-27.xlsx"
-  dust_chemical: "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx"
-  # Rendered from each run date (for example: ASH ANALYSIS 26-27).
-  ash: "ASH ANALYSIS {financial_year_short}"
+  rm_stock: "RM BULK STOCK"
+  rm_stock_sinter: "DPR SP#2"
+  dust_basic: "BF-02 BUNKER"
+  dust_chemical: "GCP DUST CATCHER"
+  ash: "ASH ANALYSIS"
 
 
 influxdb:

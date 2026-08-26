@@ -101,11 +101,11 @@ Process coke, nut coke, and PCI ash analysis from an existing workbook:
 .\.venv\Scripts\python.exe src\app.py --mode ash --rundate 31-07-2026 --skip-download
 ```
 
-Without `--skip-download`, ash mode calculates the financial year from each run
-date and renders the portal filename template in `base.yaml` (for example,
-`ASH ANALYSIS 26-27`). Sheet names and Excel columns are discovered through the
-patterns in `ash.yaml`, so financial-year suffixes, spacing changes, and shifted
-columns do not require Python changes.
+Without `--skip-download`, source workbooks are matched by stable identifiers in
+`base.yaml` (for example, `ASH ANALYSIS` or `BF-02 BUNKER`). Financial-year,
+month, revision, punctuation, spacing, and extension suffixes may change without
+requiring a configuration update. Sheet names and Excel columns are discovered
+through the patterns in each domain YAML file.
 
 `--skip` is also accepted as a short alias for `--skip-download`.
 
