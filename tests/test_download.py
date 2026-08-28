@@ -12,7 +12,7 @@ from selenium.common.exceptions import StaleElementReferenceException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.config_loader import load_yaml
-from domains.download.service import DownloadOutcome, PortalDownloader
+from domains.download.service import DownloadConfig, DownloadOutcome, PortalDownloader
 
 
 LOGGER = logging.getLogger("test_download")
@@ -128,6 +128,65 @@ class PortalDownloadRetryTests(unittest.TestCase):
         self.assertEqual(outcome.status, "downloaded")
         self.assertEqual(downloader._download_latest_file.call_count, 2)
         sleep.assert_called_once_with(3)
+
+
+class PortalFileStationSessionTests(unittest.TestCase):
+    @patch("domains.download.service.time.sleep")
+    def test_multiple_file_searches_open_file_station_only_once(self, sleep):
+        selenium_client = Mock()
+        selenium_client.driver = Mock()
+        selenium_client.wait = Mock()
+        downloader = PortalDownloader(
+            selenium_client,
+            DownloadConfig(
+                download_dir="downloads",
+                metadata_path="metadata.json",
+                file_station_url="https://portal.example/files",
+                hourly_url="https://portal.example/hourly",
+                file_station_search_path="/V-Optimaise Data/",
+            ),
+            LOGGER,
+        )
+        downloader._select_file_station_folder = Mock(return_value=True)
+        downloader._find_visible_file_grid_panel = Mock(return_value="grid-panel")
+        downloader._wait_for_rows = Mock(return_value=[{"name": "file.xlsx"}])
+
+        first_panel = downloader._prepare_file_station_session(
+            "https://portal.example/files"
+        )
+        second_panel = downloader._prepare_file_station_session(
+            "https://portal.example/files"
+        )
+
+        self.assertEqual(first_panel, "grid-panel")
+        self.assertEqual(second_panel, "grid-panel")
+        selenium_client.driver.get.assert_called_once_with(
+            "https://portal.example/files"
+        )
+        downloader._select_file_station_folder.assert_called_once_with(
+            "/V-Optimaise Data/"
+        )
+
+    @patch("domains.download.service.time.sleep")
+    def test_webdriver_error_invalidates_session_before_retry(self, sleep):
+        downloader = PortalDownloader(None, None, LOGGER)
+        downloader._file_station_session_ready = True
+        downloader._download_latest_file = Mock(
+            side_effect=[
+                StaleElementReferenceException("grid was redrawn"),
+                DownloadOutcome(status="downloaded", paths=("download.xlsx",)),
+            ]
+        )
+
+        outcome = downloader._safe_download(
+            "https://portal.example/files",
+            ["rm", "hm"],
+            "RM & HM",
+        )
+
+        self.assertEqual(outcome.status, "downloaded")
+        self.assertFalse(downloader._file_station_session_ready)
+        self.assertEqual(downloader._download_latest_file.call_count, 2)
 
 
 if __name__ == "__main__":

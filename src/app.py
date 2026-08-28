@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from core.config_loader import load_config
 from core.logging import configure_logging
+from core.portal_profiles import PortalProfileConfigError, resolve_portal_profile_jobs
 from infrastructure.selenium_client import SeleniumClient, SeleniumConfig
 from domains.download.service import (
     DownloadConfig,
@@ -355,6 +356,72 @@ def _normalize_filename(value: str) -> str:
     return "".join(character for character in str(value).casefold() if character.isalnum())
 
 
+def _download_for_profiles(
+    *,
+    modes: list[str],
+    run_dates: list[str],
+    is_today_mode: bool,
+    cfg: dict,
+    logger,
+) -> DownloadResult:
+    profile_jobs = resolve_portal_profile_jobs(modes, cfg["eml"])
+    outcomes = {}
+
+    for profile_job in profile_jobs:
+        logger.info(
+            f"Starting portal profile {profile_job.name} for modes: "
+            f"{', '.join(profile_job.modes)}"
+        )
+        selenium = SeleniumClient(
+            SeleniumConfig(default_timeout=int(cfg["download"]["default_timeout"]))
+        )
+        download_config = DownloadConfig(
+            download_dir=cfg["download"]["download_dir"],
+            metadata_path=cfg["download"]["metadata_path"],
+            file_station_url=cfg["eml"]["file_station_url"],
+            hourly_url=cfg["eml"]["hourly_url"],
+            file_station_search_path=profile_job.file_station_search_path,
+            portal_files=cfg.get("portal_files", {}),
+        )
+        downloader = PortalDownloader(
+            selenium,
+            download_config,
+            logger,
+        )
+
+        try:
+            logger.info(f"Starting browser for portal profile {profile_job.name}")
+            selenium.start()
+            logger.info(f"Logging in with portal profile {profile_job.name}")
+            selenium.login(
+                login_url=cfg["eml"]["login_url"],
+                user=profile_job.user,
+                password=profile_job.password,
+            )
+            logger.info(
+                f"Portal profile {profile_job.name} login successful; "
+                "moving to File Station download flow"
+            )
+
+            profile_result = downloader.download(
+                modes=list(profile_job.modes),
+                run_dates=run_dates,
+                is_today_mode=is_today_mode,
+            )
+            outcomes.update(profile_result.by_mode)
+            logger.info(
+                f"Portal profile {profile_job.name} download completed. "
+                f"Downloaded modes: {sorted(profile_result.downloaded_modes)} | "
+                f"Partial modes: {sorted(profile_result.partial_modes)} | "
+                f"Skipped modes: {sorted(profile_result.skipped_modes)} | "
+                f"Failed modes: {sorted(profile_result.failed_modes)}"
+            )
+        finally:
+            selenium.stop()
+
+    return DownloadResult(by_mode=outcomes)
+
+
 # -------------------------------------------------
 # MAIN
 # -------------------------------------------------
@@ -408,52 +475,24 @@ def main():
         logger.info("Skipping download step (using existing files)")
     else:
         logger.info("Starting download step")
-
-        selenium = SeleniumClient(
-            SeleniumConfig(default_timeout=int(cfg["download"]["default_timeout"]))
-        )
-
-        downloader = PortalDownloader(
-            selenium,
-            DownloadConfig(
-                download_dir=cfg["download"]["download_dir"],
-                metadata_path=cfg["download"]["metadata_path"],
-                file_station_url=cfg["eml"]["file_station_url"],
-                hourly_url=cfg["eml"]["hourly_url"],
-                file_station_search_path=cfg["eml"].get("file_station_search_path"),
-                portal_files=cfg.get("portal_files", {}),
-            ),
-            logger,
-        )
-
         try:
-            logger.info("Starting browser for portal login")
-            selenium.start()
-
-            logger.info("Logging in to portal")
-            selenium.login(
-                login_url=cfg["eml"]["login_url"],
-                user=cfg["eml"]["user"],
-                password=cfg["eml"]["password"],
-            )
-            logger.info("Login successful; moving to File Station download flow")
-
-            download_result = downloader.download(
+            download_result = _download_for_profiles(
                 modes=modes,
                 run_dates=run_dates,
                 is_today_mode=bool(args.today),
+                cfg=cfg,
+                logger=logger,
             )
+        except PortalProfileConfigError as exc:
+            raise SystemExit(str(exc)) from None
 
-            logger.info(
-                "Download completed. "
-                f"Downloaded modes: {sorted(download_result.downloaded_modes)} | "
-                f"Partial modes: {sorted(download_result.partial_modes)} | "
-                f"Skipped modes: {sorted(download_result.skipped_modes)} | "
-                f"Failed modes: {sorted(download_result.failed_modes)}"
-            )
-
-        finally:
-            selenium.stop()
+        logger.info(
+            "Download completed across all required portal profiles. "
+            f"Downloaded modes: {sorted(download_result.downloaded_modes)} | "
+            f"Partial modes: {sorted(download_result.partial_modes)} | "
+            f"Skipped modes: {sorted(download_result.skipped_modes)} | "
+            f"Failed modes: {sorted(download_result.failed_modes)}"
+        )
 
     # -------------------------------------------------
     # RM

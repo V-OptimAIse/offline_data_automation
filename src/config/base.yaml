@@ -19,8 +19,18 @@ write_db: [ influx_db, pi_db, neon_db ]
 eml:
   login_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/"
   file_station_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/?launchApp=SYNO.SDS.App.FileStation3.Instance&SynoToken=laNlkmozfCC0g"
-  file_station_search_path: "/V-Optimaise Data/"
   hourly_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/index.cgi?launchApp=SYNO.SDS.App.FileStation3.Instance&launchParam=openfile%3D%252FV-Optimaise%2520Data%252FBF2%2520AUTO%2520REPORTS%252FCHARGE%2520AND%2520DUMP%252FHOURLY%252F"
+  profiles:
+    profile_1:
+      user: ${EML_PROFILE_1_USER}
+      password: ${EML_PROFILE_1_PASSWORD}
+      file_station_search_path: "/V-Optimaise Data/"
+      modes: [charge, dpr, rm_hm, rm_stock, ash]
+    profile_2:
+      user: ${EML_PROFILE_2_USER}
+      password: ${EML_PROFILE_2_PASSWORD}
+      file_station_search_path: "/QC_LAB_DATA"
+      modes: [rm, fines_analysis, hot_metal, dust]
 
 # Stable identifiers used to find portal files. Text after these identifiers
 # (financial year, month, revision, and extension) may change freely.

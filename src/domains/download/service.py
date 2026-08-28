@@ -136,6 +136,7 @@ class PortalDownloader:
         self.sc = selenium_client
         self.cfg = cfg
         self.logger = logger
+        self._file_station_session_ready = False
 
     # -------------------------------------------------
     # METADATA
@@ -870,15 +871,22 @@ class PortalDownloader:
     # -------------------------------------------------
     # DOWNLOAD WITH METADATA CHECK
     # -------------------------------------------------
-    def _download_latest_file(
-        self,
-        url: str,
-        keywords: List[str],
-        expected_name: str | None = None,
-    ) -> DownloadOutcome:
-        search_label = expected_name or keywords
-        self.logger.info(f"Opening File Station for file search: {search_label}")
+    def _prepare_file_station_session(self, url: str):
+        """Open and configure File Station once, then reuse its live file grid."""
+        if self._file_station_session_ready:
+            try:
+                panel = self._find_visible_file_grid_panel()
+                if self._wait_for_rows(panel, timeout=3):
+                    self.logger.info("Reusing current File Station page")
+                    return panel
+            except WebDriverException as exc:
+                self.logger.warning(
+                    f"Current File Station page is unavailable; reopening it: {exc}"
+                )
 
+            self._file_station_session_ready = False
+
+        self.logger.info("Opening File Station for profile download session")
         self.sc.driver.get(url)
         self.sc.wait.until(
             lambda d: d.execute_script("return document.readyState") == "complete"
@@ -886,14 +894,13 @@ class PortalDownloader:
         self.logger.info("File Station page loaded")
 
         time.sleep(2)
-
         self.sc.wait.until(
             EC.presence_of_element_located((By.CLASS_NAME, "x-grid3-body"))
         )
         self.logger.info("File Station UI loaded")
 
         if not self._select_file_station_folder(self.cfg.file_station_search_path):
-            return DownloadOutcome(status="failed")
+            return None
 
         try:
             self.logger.info("Sorting File Station grid by Modified Date if available")
@@ -904,17 +911,36 @@ class PortalDownloader:
         except Exception:
             pass
 
-        self.logger.info("File Station grid is ready; reading visible rows")
-
         try:
             panel = self._find_visible_file_grid_panel()
-        except Exception:
-            panel = None
+        except Exception as exc:
+            self.logger.error(f"Could not locate File Station grid panel: {exc}")
+            return None
 
-        rows = self._wait_for_rows(panel)
-
-        if not rows:
+        if not self._wait_for_rows(panel):
             self.logger.error("File list not loaded (timeout)")
+            return None
+
+        self._file_station_session_ready = True
+        self.logger.info("File Station download session is ready")
+        return panel
+
+    def _download_latest_file(
+        self,
+        url: str,
+        keywords: List[str],
+        expected_name: str | None = None,
+    ) -> DownloadOutcome:
+        search_label = expected_name or keywords
+        panel = self._prepare_file_station_session(url)
+        if panel is None:
+            return DownloadOutcome(status="failed")
+
+        self.logger.info(f"Searching current File Station page for: {search_label}")
+        self._rewind_file_grid(panel)
+        rows = self._wait_for_rows(panel, timeout=3)
+        if not rows:
+            self.logger.error("File list unavailable in current File Station session")
             return DownloadOutcome(status="failed")
 
         self.logger.info(
@@ -993,6 +1019,7 @@ class PortalDownloader:
             try:
                 outcome = self._download_latest_file(url, keywords, expected_name)
             except WebDriverException as exc:
+                self._file_station_session_ready = False
                 self.logger.warning(
                     "Browser download attempt failed "
                     f"({attempt}/3) for {expected_name or keywords}: {exc}"

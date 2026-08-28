@@ -48,10 +48,19 @@ class SeleniumClient:
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-first-run")
+        chrome_options.add_argument("--no-default-browser-check")
+        chrome_options.add_experimental_option(
+            "prefs",
+            {
+                "credentials_enable_service": False,
+                "profile.password_manager_enabled": False,
+            },
+        )
         chrome_options.page_load_strategy = "eager"
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
-        chromium_path = which("chromium-browser")
+        chromium_path = which("chromium-browser") or which("chromium")
         chromedriver_path = which("chromedriver")
 
         if chromium_path and chromedriver_path:
@@ -59,6 +68,9 @@ class SeleniumClient:
             chrome_options.binary_location = chromium_path
             chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--window-size=1920,1080")
+            # Avoid GNOME Keyring/KWallet unlock prompts in the automation-only
+            # browser. Password saving is disabled by the preferences above.
+            chrome_options.add_argument("--password-store=basic")
             self._headless = True
 
             service = Service(chromedriver_path)

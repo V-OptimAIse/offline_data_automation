@@ -58,6 +58,27 @@ Important files:
 
 Secrets should be provided through `.env` or `src/config/secrets.yaml`. Do not commit secrets.
 
+Portal logins are selected automatically from the requested modes. Add both
+profiles to `.env`:
+
+```dotenv
+EML_PROFILE_1_USER=your-profile-1-user
+EML_PROFILE_1_PASSWORD=your-profile-1-password
+EML_PROFILE_2_USER=your-profile-2-user
+EML_PROFILE_2_PASSWORD=your-profile-2-password
+```
+
+Profile 1 is used for `charge`, `dpr`, `rm_hm`, `rm_stock`, and `ash`, with
+File Station searches scoped to `/V-Optimaise Data/`. Profile 2 is used for
+`rm`, `fines_analysis`, `hot_metal`, and `dust`, with searches scoped to
+`/QC_LAB_DATA`.
+Credentials are never written to logs. A command containing modes from only
+one profile opens one browser session. If modes from both profiles are supplied,
+the application groups them and opens one browser session per required profile.
+Within each profile session, File Station and the configured search folder are
+opened once; subsequent files are found from the same live grid without page
+reloads. A reload is used only to recover from an unavailable browser page.
+
 ## Running
 
 Run from the repository root:
@@ -76,6 +97,18 @@ Run for a date range:
 
 ```powershell
 .\.venv\Scripts\python.exe src\app.py --mode rm,dpr,hot_metal --rundate "01-05-2026 to 15-05-2026"
+```
+
+Run all profile 1 jobs together:
+
+```powershell
+.\.venv\Scripts\python.exe src\app.py --mode charge,dpr,rm_hm,rm_stock,ash --today
+```
+
+Run all profile 2 jobs together:
+
+```powershell
+.\.venv\Scripts\python.exe src\app.py --mode rm,fines_analysis,hot_metal,dust --today
 ```
 
 Use existing downloaded files without opening the portal:
