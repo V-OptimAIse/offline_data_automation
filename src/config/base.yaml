@@ -13,7 +13,7 @@ logging:
 #   write_db: [influx_db]
 #   write_db: [pi_db]
 #   write_db: [neon_db, influx_db, pi_db]
-write_db: [ influx_db, pi_db, neon_db ]
+write_db: [pi_db, neon_db ]
 
 
 eml:
