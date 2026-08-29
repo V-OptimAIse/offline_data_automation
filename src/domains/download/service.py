@@ -22,6 +22,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 CHARGE_DOWNLOAD_RETRIES = 5
+EXCEL_LOCK_FILE_PREFIX = "~$"
 
 
 # -------------------------------------------------
@@ -93,6 +94,12 @@ def _parse_dt(s: str | None) -> datetime | None:
         except Exception:
             pass
     return None
+
+
+def is_excel_lock_file(filename: str | os.PathLike[str]) -> bool:
+    """Return whether a path or portal label is an Excel temporary lock file."""
+    basename = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+    return basename.startswith(EXCEL_LOCK_FILE_PREFIX)
 
 
 def format_portal_filename(template: str, run_date: str) -> str:
@@ -214,6 +221,9 @@ class PortalDownloader:
         expected_name: str,
         keywords: List[str] | None = None,
     ) -> bool:
+        if is_excel_lock_file(filename):
+            return False
+
         filename_norm = self._normalize_name(filename)
         expected_norm = self._normalize_name(expected_name)
 
@@ -248,7 +258,9 @@ class PortalDownloader:
 
             for f in files:
                 # ignore temp files
-                if f.endswith((".crdownload", ".tmp", ".part")):
+                if is_excel_lock_file(f) or f.endswith(
+                    (".crdownload", ".tmp", ".part")
+                ):
                     continue
 
                 # must match expected file
@@ -780,6 +792,9 @@ class PortalDownloader:
         expected_norm = self._normalize_name(expected_name or "")
 
         for r in rows:
+            if is_excel_lock_file(r["name"]):
+                continue
+
             name = self._normalize_name(r["name"])
 
             if not name.strip():
@@ -1035,8 +1050,10 @@ class PortalDownloader:
         return DownloadOutcome(status="failed")
 
     def _charge_name_matches(self, name: str, stem: str) -> bool:
-        return name == f"{stem}.xlsx" or (
-            name.startswith(stem) and name.lower().endswith(".xlsx")
+        return not is_excel_lock_file(name) and (
+            name == f"{stem}.xlsx" or (
+                name.startswith(stem) and name.lower().endswith(".xlsx")
+            )
         )
 
     def _find_visible_charge_row(self, panel, stem: str):

@@ -12,7 +12,12 @@ from selenium.common.exceptions import StaleElementReferenceException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.config_loader import load_yaml
-from domains.download.service import DownloadConfig, DownloadOutcome, PortalDownloader
+from domains.download.service import (
+    DownloadConfig,
+    DownloadOutcome,
+    PortalDownloader,
+    is_excel_lock_file,
+)
 
 
 LOGGER = logging.getLogger("test_download")
@@ -65,6 +70,34 @@ class PortalFilenameMatchingTests(unittest.TestCase):
                 self.assertTrue(
                     self.downloader._name_contains_identifier(filename, identifier)
                 )
+
+    def test_excel_lock_file_is_never_selected_or_matched_for_download(self):
+        rows = [
+            {
+                "name": "~$15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx",
+                "modified": "08/29/2026 12:00:00",
+            },
+            {
+                "name": "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx",
+                "modified": "08/28/2026 12:00:00",
+            },
+        ]
+
+        match = self.downloader._find_latest_matching_file(
+            rows,
+            ["gcp", "dust", "catcher"],
+            "GCP DUST CATCHER",
+        )
+
+        self.assertEqual(match["name"], rows[1]["name"])
+        self.assertTrue(is_excel_lock_file(rows[0]["name"]))
+        self.assertFalse(
+            self.downloader._download_name_matches(
+                rows[0]["name"],
+                "GCP DUST CATCHER",
+                ["gcp", "dust", "catcher"],
+            )
+        )
 
     def test_base_config_uses_stable_identifiers(self):
         portal_files = load_yaml("src/config/base.yaml")["portal_files"]

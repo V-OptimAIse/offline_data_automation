@@ -14,6 +14,7 @@ from domains.download.service import (
     DownloadResult,
     PortalDownloader,
     format_portal_filename,
+    is_excel_lock_file,
 )
 
 from domains.rm.service import RMService
@@ -127,7 +128,11 @@ def _latest_existing_file(download_dir: Path, patterns: tuple[str, ...]) -> Path
     for pattern in patterns:
         files.extend(download_dir.glob(pattern))
 
-    files = [path for path in files if path.is_file()]
+    files = [
+        path
+        for path in files
+        if path.is_file() and not is_excel_lock_file(path.name)
+    ]
     if not files:
         return None
 
@@ -139,6 +144,7 @@ def _latest_matching_file(files: list[Path], patterns: tuple[str, ...]) -> Path 
         path
         for path in files
         if path.is_file()
+        and not is_excel_lock_file(path.name)
         and any(fnmatch(path.name.lower(), pattern.lower()) for pattern in patterns)
     ]
     return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
@@ -159,6 +165,12 @@ def _downloaded_files_for_mode(
         return []
 
     files = [Path(path) for path in outcome.paths]
+    ignored_files = [path for path in files if is_excel_lock_file(path.name)]
+    files = [path for path in files if not is_excel_lock_file(path.name)]
+
+    for path in ignored_files:
+        logger.warning(f"{mode}: ignoring Excel temporary lock file: {path}")
+
     existing_files = [path for path in files if path.exists()]
     missing_files = [path for path in files if not path.exists()]
 
@@ -204,7 +216,11 @@ def _source_file_for_mode(
 def _charge_file_for_date(files: list[Path], run_date: str) -> Path | None:
     dt = datetime.strptime(run_date, "%d-%b-%Y")
     stem = f"CHARGE_AND_DUMP_REPORT_{dt.day}_{dt.month}_{dt.year}"
-    matches = [path for path in files if stem in path.name]
+    matches = [
+        path
+        for path in files
+        if not is_excel_lock_file(path.name) and stem in path.name
+    ]
     if not matches:
         return None
     return max(matches, key=lambda path: path.stat().st_mtime)
@@ -221,7 +237,11 @@ def _charge_source_files(
         files = []
         for pattern in MODE_FILE_PATTERNS["charge"]:
             files.extend(download_dir.glob(pattern))
-        files = [path for path in files if path.is_file()]
+        files = [
+            path
+            for path in files
+            if path.is_file() and not is_excel_lock_file(path.name)
+        ]
         if not files:
             logger.warning(
                 "charge: no existing source files found; skipping read/DB write"
@@ -306,7 +326,7 @@ def _ash_source_files(
             path
             for pattern in ASH_PATTERNS
             for path in download_dir.glob(pattern)
-            if path.is_file() and not path.name.startswith("~$")
+            if path.is_file() and not is_excel_lock_file(path.name)
         ]
         expected_names = tuple(
             dict.fromkeys(
