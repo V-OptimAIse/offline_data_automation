@@ -22,6 +22,11 @@ def _normalized_header_key(header: str) -> str:
         return "CHEM_%SI"
     if compact_left == "%S" and sep:
         return "CHEM_%S"
+    if compact_left in {"%P", "BASICITY"}:
+        # The second HOT_METAL header row contains limits/specifications, not
+        # part of the field name. These values change between workbooks (and
+        # can be blank), so match these fields by their stable primary label.
+        return compact_left
 
     return text
 
