@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -49,6 +51,88 @@ class SeleniumClientStartTests(unittest.TestCase):
         )
         service.assert_called_once_with("/usr/bin/chromedriver")
         self.assertTrue(client._headless)
+
+
+class SeleniumClientLoginTests(unittest.TestCase):
+    @staticmethod
+    def _mock_browser_lifecycle(client: SeleniumClient):
+        def start():
+            client.driver = Mock()
+            client.wait = Mock()
+
+        def stop():
+            client.driver = None
+            client.wait = None
+
+        client.start = Mock(side_effect=start)
+        client.stop = Mock(side_effect=stop)
+
+    @patch("infrastructure.selenium_client.time.sleep")
+    def test_login_reconnects_and_succeeds_on_third_attempt(self, sleep):
+        client = SeleniumClient(SeleniumConfig(login_retries=3))
+        self._mock_browser_lifecycle(client)
+        client._login_once = Mock(
+            side_effect=[
+                TimeoutException("login page unavailable"),
+                WebDriverException("ChromeDriver disconnected"),
+                None,
+            ]
+        )
+
+        client.login("https://portal.example", "user", "password")
+
+        self.assertEqual(client._login_once.call_count, 3)
+        self.assertEqual(client.start.call_count, 3)
+        self.assertEqual(client.stop.call_count, 2)
+        self.assertEqual(sleep.call_count, 2)
+
+    @patch("infrastructure.selenium_client.time.sleep")
+    def test_login_retries_browser_start_failures(self, sleep):
+        client = SeleniumClient(SeleniumConfig(login_retries=3))
+        start_attempts = 0
+
+        def start():
+            nonlocal start_attempts
+            start_attempts += 1
+            if start_attempts < 3:
+                raise WebDriverException("ChromeDriver unavailable")
+            client.driver = Mock()
+            client.wait = Mock()
+
+        def stop():
+            client.driver = None
+            client.wait = None
+
+        client.start = Mock(side_effect=start)
+        client.stop = Mock(side_effect=stop)
+        client._login_once = Mock()
+
+        client.login("https://portal.example", "user", "password")
+
+        self.assertEqual(client.start.call_count, 3)
+        self.assertEqual(client._login_once.call_count, 1)
+        self.assertEqual(client.stop.call_count, 2)
+        self.assertEqual(sleep.call_count, 2)
+
+    @patch("infrastructure.selenium_client.time.sleep")
+    def test_login_stops_after_three_failed_attempts(self, sleep):
+        client = SeleniumClient(SeleniumConfig(login_retries=3))
+        self._mock_browser_lifecycle(client)
+        client._login_once = Mock(
+            side_effect=TimeoutException("login page unavailable")
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Portal login failed after 3 attempts.*Operation stopped",
+        ):
+            client.login("https://portal.example", "user", "password")
+
+        self.assertEqual(client._login_once.call_count, 3)
+        self.assertEqual(client.start.call_count, 3)
+        self.assertEqual(client.stop.call_count, 3)
+        self.assertIsNone(client.driver)
+        self.assertIsNone(client.wait)
 
 
 if __name__ == "__main__":

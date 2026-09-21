@@ -410,9 +410,10 @@ def _download_for_profiles(
         )
 
         try:
-            logger.info(f"Starting browser for portal profile {profile_job.name}")
-            selenium.start()
-            logger.info(f"Logging in with portal profile {profile_job.name}")
+            logger.info(
+                f"Starting browser and logging in with portal profile "
+                f"{profile_job.name}"
+            )
             selenium.login(
                 login_url=cfg["eml"]["login_url"],
                 user=profile_job.user,

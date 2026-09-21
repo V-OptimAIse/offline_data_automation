@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from shutil import which
@@ -15,13 +16,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from urllib3.exceptions import ReadTimeoutError
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class SeleniumConfig:
     default_timeout: int = 180
     page_load_timeout: int = 180
     script_timeout: int = 30
     command_timeout: int | None = None
-    login_retries: int = 2
+    login_retries: int = 3
 
     @property
     def effective_command_timeout(self) -> int:
@@ -118,26 +122,35 @@ class SeleniumClient:
 
 
     def login(self, login_url: str, user: str, password: str) -> None:
-        if not self.driver or not self.wait:
-            raise RuntimeError("SeleniumClient not started. Call start() first.")
-
+        max_attempts = max(1, int(self.config.login_retries))
         last_error = None
-        for attempt in range(1, self.config.login_retries + 1):
+        for attempt in range(1, max_attempts + 1):
             try:
+                if attempt > 1:
+                    self.stop()
+                    time.sleep(2)
+
+                if not self.driver or not self.wait:
+                    self.start()
+
                 self._login_once(login_url, user, password)
                 return
             except (ReadTimeoutError, TimeoutException, WebDriverException) as exc:
                 last_error = exc
-                if attempt >= self.config.login_retries:
-                    break
+                if attempt < max_attempts:
+                    logger.warning(
+                        "Portal login attempt %s/%s failed (%s); reconnecting "
+                        "with a fresh browser session",
+                        attempt,
+                        max_attempts,
+                        type(exc).__name__,
+                    )
 
-                self.stop()
-                time.sleep(2)
-                self.start()
-
+        self.stop()
         raise RuntimeError(
-            "Portal login failed because Chrome/ChromeDriver stopped responding "
-            "or the username/password fields did not appear."
+            f"Portal login failed after {max_attempts} attempts because "
+            "Chrome/ChromeDriver stopped responding or the username/password "
+            "fields did not appear. Operation stopped."
         ) from last_error
 
     def _login_once(self, login_url: str, user: str, password: str) -> None:
@@ -160,13 +173,21 @@ class SeleniumClient:
         time.sleep(4)
 
     def stop(self) -> None:
-        if self.driver:
-            service = getattr(self.driver, "service", None)
+        driver = self.driver
+        try:
+            if not driver:
+                return
+
+            service = getattr(driver, "service", None)
             self._set_command_timeout(10)
             try:
-                self.driver.quit()
+                driver.quit()
             except Exception:
                 if service is not None:
-                    service.stop()
-        self.driver = None
-        self.wait = None
+                    try:
+                        service.stop()
+                    except Exception:
+                        pass
+        finally:
+            self.driver = None
+            self.wait = None
