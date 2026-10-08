@@ -13,7 +13,7 @@ logging:
 #   write_db: [influx_db]
 #   write_db: [pi_db]
 #   write_db: [neon_db, influx_db, pi_db]
-write_db: [pi_db]
+write_db: [pi_db, neon_db]
 
 
 eml:
@@ -36,6 +36,7 @@ eml:
 # (financial year, month, revision, and extension) may change freely.
 portal_files:
   rm: "BF-02 BUNKER"
+  rm_sinter: "BF-01 BUNKER"
   fines_analysis: "BF-02 BUNKER"
   dpr: "BF-02 DPR"
   hot_metal: "BF-02- HOT METAL, SLAG"

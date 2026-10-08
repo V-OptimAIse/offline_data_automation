@@ -38,9 +38,10 @@ class RMService:
 
     def process(
         self,
-        rm_file: str,
+        rm_file: str | None,
         setting_cfg: dict[str, Any],
         run_dates: list[str],
+        sinter_file: str | None = None,
     ) -> pd.DataFrame:
         rm_cfg = setting_cfg["rm"]
         output_dir, output_filename = self._output_settings(rm_cfg)
@@ -48,7 +49,13 @@ class RMService:
 
         self.logger.info("RM processing started")
 
-        frames = self.reader.read(rm_file, rm_cfg["sheet_config"])
+        frames = []
+        if rm_file:
+            frames.extend(self.reader.read(rm_file, rm_cfg["sheet_config"]))
+        if sinter_file:
+            frames.extend(
+                self.reader.read(sinter_file, rm_cfg["sinter_sheet_config"])
+            )
         parts = self._process_sheets(
             frames=frames,
             run_dates=run_date_list,

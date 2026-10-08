@@ -34,6 +34,8 @@ rm:
 
       "sinter sp 02 online":   {table: sinter_chemistry, material_code: sinter_3}
       "sinter sp 02 offline":  {table: sinter_chemistry, material_code: sinter_4}
+      "sinter sp 01 online":   {table: sinter_chemistry, material_code: sinter_1}
+      "sinter sp 01 offline":  {table: sinter_chemistry, material_code: sinter_2}
 
       "ore 1":                 {table: ore_chemistry,    material_code: ore_1}
       "ore 2":                 {table: ore_chemistry,    material_code: ore_2}
@@ -269,7 +271,7 @@ rm:
     JRS_VENTURES:             {col_prefix: ORE_4_,         columns: A:S, header_row: 3, sheet_name: "JRS VENTURES "}
     LLOYDS_CLO:               {col_prefix: ORE_2_,         columns: A:R, header_row: 2, sheet_name: LLOYDS CLO}
     NMDC_DONOMALAI:           {col_prefix: ORE_1_,         columns: A:R, header_row: 2, sheet_name: NMDC DONOMALAI}
-    NMDC_ROM:                 {col_prefix: ORE_5_,         columns: A:Q, header_row: 2, sheet_name: NMDC  KIRNDUL}
+    NMDC_ROM:                 {col_prefix: ORE_5_,         columns: A:Q, header_row: 2, sheet_name: NMDC KIRANDUL}
     LLOYDS_OVERSIZE_CLO:      {col_prefix: ORE_6_,         columns: A:Q, header_row: 2, sheet_name: LLOYDS FINES OVER SIZE}
     BACHELI_FINES_OVERSIZE:   {col_prefix: ORE_7_,         columns: A:Q, header_row: 2, sheet_name: "BACHELI FINES OVER SIZE "}
     JAYASWAL_NECO:            {col_prefix: ORE_9_,         columns: B:R, header_row: 2, sheet_name: JAYASWAL NECO}
@@ -281,6 +283,10 @@ rm:
     LLOYDS_PELLET:            {col_prefix: LLOYDS_PELLET_, columns: A:R, header_row: 3, sheet_name: LLOYDS PELLET}
     ACORE_IND:                {col_prefix: ORE_8_,         columns: A:S, header_row: 3, sheet_name: ACORE IND.PVT LTD}
     GOMTI:                    {col_prefix: ORE_10_,        columns: A:R, header_row: 3, sheet_name: GOMTI}
+
+  # BF-01 is intentionally restricted to this chemistry sheet.
+  sinter_sheet_config:
+    SINTER_BF01: {col_prefix: SINTER_SP_01_, columns: B:Q, header_row: 5, sheet_name: BF-SKIP SINTER, status_column: BUNKER NO.}
 
   rename_fields:
     Date: date
@@ -338,6 +344,30 @@ rm:
     SINTER_SP_02_%_T._ALKALI: sinter sp 02 online na2o
     SINTER_SP_02_BASICITY: sinter sp 02 online basicity
     SINTER_SP_02_UNNAMED:_11: sinter sp 02 online k2o
+    SINTER_SP_01_%AL2O3_ON: sinter sp 01 online al2o3
+    SINTER_SP_01_%CAO_ON: sinter sp 01 online cao
+    SINTER_SP_01_%FE(T)_ON: sinter sp 01 online fe_t
+    SINTER_SP_01_%FEO_ON: sinter sp 01 online feo
+    SINTER_SP_01_%MGO_ON: sinter sp 01 online mgo
+    SINTER_SP_01_%MNO_ON: sinter sp 01 online mno
+    SINTER_SP_01_%P_ON: sinter sp 01 online p
+    SINTER_SP_01_%SIO2_ON: sinter sp 01 online sio2
+    SINTER_SP_01_%TIO2_ON: sinter sp 01 online tio2
+    SINTER_SP_01_%_T._ALKALI_ON: sinter sp 01 online na2o
+    SINTER_SP_01_BASICITY_ON: sinter sp 01 online basicity
+    SINTER_SP_01_UNNAMED:_11_ON: sinter sp 01 online k2o
+    SINTER_SP_01_%AL2O3_OFF: sinter sp 01 offline al2o3
+    SINTER_SP_01_%CAO_OFF: sinter sp 01 offline cao
+    SINTER_SP_01_%FE(T)_OFF: sinter sp 01 offline fe_t
+    SINTER_SP_01_%FEO_OFF: sinter sp 01 offline feo
+    SINTER_SP_01_%MGO_OFF: sinter sp 01 offline mgo
+    SINTER_SP_01_%MNO_OFF: sinter sp 01 offline mno
+    SINTER_SP_01_%P_OFF: sinter sp 01 offline p
+    SINTER_SP_01_%SIO2_OFF: sinter sp 01 offline sio2
+    SINTER_SP_01_%TIO2_OFF: sinter sp 01 offline tio2
+    SINTER_SP_01_%_T._ALKALI_OFF: sinter sp 01 offline na2o
+    SINTER_SP_01_BASICITY_OFF: sinter sp 01 offline basicity
+    SINTER_SP_01_UNNAMED:_11_OFF: sinter sp 01 offline k2o
     LLOYDS_PELLET_%AL2O3: ore pellet 1 al2o3
     LLOYDS_PELLET_%CAO: ore pellet 1 cao
     LLOYDS_PELLET_%FE(T): ore pellet 1 fe_t

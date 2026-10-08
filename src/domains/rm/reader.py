@@ -65,6 +65,8 @@ class RMReader:
             ).dropna(how="all")
 
             df.columns = [str(c).strip().upper() for c in df.columns]
+            if status_column := cfg.get("status_column"):
+                df["ONLINE/OFFLINE"] = df[str(status_column).strip().upper()]
             frames.append((df.reset_index(drop=True), prefix, sheet))
 
         return frames

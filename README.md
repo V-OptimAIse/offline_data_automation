@@ -99,6 +99,11 @@ Run for a date range:
 .\.venv\Scripts\python.exe src\app.py --mode rm,dpr,hot_metal --rundate "01-05-2026 to 15-05-2026"
 ```
 
+RM mode resolves both BF-02 and BF-01 BUNKER workbooks. BF-02 keeps the full
+RM processing flow; from BF-01, only the `BF-SKIP SINTER` chemistry sheet is
+read. BF-01 online/offline chemistry is synced as `sinter_1`/`sinter_2`; the
+existing BF-02 `sinter_3`/`sinter_4` mapping remains unchanged.
+
 Run all profile 1 jobs together:
 
 ```powershell

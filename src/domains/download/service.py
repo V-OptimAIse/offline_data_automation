@@ -1236,7 +1236,6 @@ class PortalDownloader:
                 self.logger.info(f"Using File Station search folder: {search_path}")
 
             mode_keywords = {
-                "rm": ["bf-02", "bunker"],
                 "fines_analysis": ["bf-02", "bunker"],
                 "dpr": ["bf-02", "dpr"],
                 "hot_metal": ["bf-02", "hot", "metal"],
@@ -1264,6 +1263,16 @@ class PortalDownloader:
 
             for m in modes:
                 if m == "charge":
+                    continue
+
+                if m == "rm":
+                    portal_files = self.cfg.portal_files or {}
+                    outcomes[m] = _combine_download_outcomes([
+                        cached_download(["bf-02", "bunker"], portal_files.get("rm")),
+                        cached_download(
+                            ["bf-01", "bunker"], portal_files.get("rm_sinter")
+                        ),
+                    ])
                     continue
 
                 if m == "rm_stock":

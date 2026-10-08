@@ -30,14 +30,15 @@ from domains.ash.service import AshService
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 RM_STOCK_BULK_PATTERNS = ("RM BULK STOCK*",)
 RM_STOCK_SINTER_PATTERNS = ("*DPR SP#2*.xls*",)
-DUST_BASIC_PATTERNS = ("*BUNKER*.xlsx",)
+BF02_BUNKER_PATTERNS = ("*BF-02*BUNKER*.xls*",)
+BF01_BUNKER_PATTERNS = ("*BF-01*BUNKER*.xls*",)
+DUST_BASIC_PATTERNS = BF02_BUNKER_PATTERNS
 DUST_CHEMICAL_PATTERNS = (
     "*GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS*.xlsx",
 )
 ASH_PATTERNS = ("*ASH ANALYSIS*.xlsx",)
 MODE_FILE_PATTERNS = {
-    "rm": ("*BUNKER*.xlsx",),
-    "fines_analysis": ("*BUNKER*.xlsx",),
+    "fines_analysis": BF02_BUNKER_PATTERNS,
     "dpr": ("*DPR*.xlsx",),
     "hot_metal": ("*HOT METAL*.xlsx",),
     "rm_hm": ("*RM & HM*.xlsx",),
@@ -211,6 +212,31 @@ def _source_file_for_mode(
 
     logger.info(f"{mode}: using existing source file: {source_file}")
     return source_file
+
+
+def _rm_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> tuple[Path | None, Path | None]:
+    downloaded = [] if skip_download else _downloaded_files_for_mode(
+        "rm", download_result, logger
+    )
+    resolver = (
+        lambda patterns: _latest_existing_file(download_dir, patterns)
+        if skip_download
+        else _latest_matching_file(downloaded, patterns)
+    )
+    files = tuple(resolver(patterns) for patterns in (
+        BF02_BUNKER_PATTERNS,
+        BF01_BUNKER_PATTERNS,
+    ))
+    for label, path in zip(("BF-02 RM", "BF-01 sinter chemistry"), files):
+        log = logger.info if path else logger.warning
+        log(f"rm: {label} source file: {path or 'not found'}")
+    return files
 
 
 def _charge_file_for_date(files: list[Path], run_date: str) -> Path | None:
@@ -519,15 +545,19 @@ def main():
     # RM
     # -------------------------------------------------
     if "rm" in modes:
-        rm_file = _source_file_for_mode(
-            "rm",
+        rm_file, rm_sinter_file = _rm_source_files(
             skip_download=args.skip_download,
             download_dir=download_dir,
             download_result=download_result,
             logger=logger,
         )
-        if rm_file:
-            RMService(logger).process(str(rm_file), cfg, run_dates)
+        if rm_file or rm_sinter_file:
+            RMService(logger).process(
+                str(rm_file) if rm_file else None,
+                cfg,
+                run_dates,
+                str(rm_sinter_file) if rm_sinter_file else None,
+            )
 
     # -------------------------------------------------
     # FINES ANALYSIS
