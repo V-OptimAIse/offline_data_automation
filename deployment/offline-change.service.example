@@ -1,0 +1,11 @@
+[Unit]
+Description=Offline Data Automation - remote Synology file change check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/offline_data_automation-uat
+ExecStart=/home/pi/offline_data_automation-uat/.venv/bin/python /home/pi/offline_data_automation-uat/watch_synology.py
+TimeoutStartSec=2700
