@@ -94,7 +94,7 @@ def load_config(
     fines_analysis_path: str = "src/config/fines_analysis.yaml",
     dpr_path: str = "src/config/dpr.yaml",
     hot_metal_path: str = "src/config/hot_metal.yaml",
-    rm_hm_path: str = "src/config/rm_hm.yaml",
+    rm_strength_path: str = "src/config/rm_strength.yaml",
     dust_path: str = "src/config/dust.yaml",
     ash_path: str = "src/config/ash.yaml",
     env_path: str | Path = ".env",
@@ -107,7 +107,7 @@ def load_config(
     fines_analysis_file_cfg = load_yaml(fines_analysis_path)
     dpr_file_cfg = load_yaml(dpr_path)
     hm_file_cfg = load_yaml(hot_metal_path)
-    rm_hm_file_cfg = load_yaml(rm_hm_path)
+    rm_strength_file_cfg = load_yaml(rm_strength_path)
     dust_file_cfg = load_yaml(dust_path)
     ash_file_cfg = load_yaml(ash_path)
 
@@ -141,10 +141,9 @@ def load_config(
     )
 
     # -----------------------------
-    # RM_HM CONFIG
+    # RM STRENGTH CONFIG
     # -----------------------------
-    merged["rm_hm"] = rm_hm_file_cfg.get("rm_hm", {})
-    merged["rm_hm_fields"] = rm_hm_file_cfg.get("rm_hm_fields", {})
+    merged["rm_strength"] = rm_strength_file_cfg.get("rm_strength", {})
 
     # -----------------------------
     # DUST ANALYSIS CONFIG

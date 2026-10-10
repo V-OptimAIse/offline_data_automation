@@ -12,7 +12,7 @@ Use the `--mode` argument with one or more comma-separated modes:
 - `fines_analysis` - material fines size analysis
 - `dpr` - daily production report data
 - `hot_metal` - hot metal, slag, and gas analysis
-- `rm_hm` - raw material and hot metal strength data
+- `rm_strength` - coke and SP-02 sinter strength data
 - `rm_stock` - raw material physical stock
 - `charge` - charge and dump report processing
 - `dust` - BF2 dust basic and detailed chemical analysis
@@ -50,7 +50,7 @@ Important files:
 - `src/config/fines_analysis.yaml` - fines analysis sheet and material mappings
 - `src/config/dpr.yaml` - DPR field mappings and sheet discovery rules
 - `src/config/hot_metal.yaml` - hot metal sheet and field mappings
-- `src/config/rm_hm.yaml` - RM and HM field mappings
+- `src/config/rm_strength.yaml` - coke and SP-02 strength column mappings
 - `src/config/charge.yaml` - charge report target tables and batch metadata
 - `src/config/rm_stock.yaml` - stock material name mappings
 - `src/config/dust.yaml` - dust workbooks, BF2 filter, material codes, tables, and measurements
@@ -68,7 +68,7 @@ EML_PROFILE_2_USER=your-profile-2-user
 EML_PROFILE_2_PASSWORD=your-profile-2-password
 ```
 
-Profile 1 is used for `charge`, `dpr`, `rm_hm`, `rm_stock`, and `ash`, with
+Profile 1 is used for `charge`, `dpr`, `rm_strength`, `rm_stock`, and `ash`, with
 File Station searches scoped to `/V-Optimaise Data/`. Profile 2 is used for
 `rm`, `fines_analysis`, `hot_metal`, and `dust`, with searches scoped to
 `/QC_LAB_DATA`.
@@ -101,14 +101,29 @@ Run for a date range:
 
 RM mode resolves both BF-02 and BF-01 BUNKER workbooks. BF-02 keeps the full
 RM processing flow; from BF-01, only the `BF-SKIP SINTER` chemistry sheet is
-read. BF-01 online/offline chemistry is synced as `sinter_1`/`sinter_2`; the
-existing BF-02 `sinter_3`/`sinter_4` mapping remains unchanged.
+read. BF-01 ONLINE and BF-02 ONLINE chemistry are two laboratory sources for
+the same material and are synced through a dedicated event path as `sinter_3`.
+The first new source result in a shift uses the normal shift timestamp; the
+second uses its source event time. BF-02 supplies sample times in its `TIME`
+column. When a source such as BF-01 has no row-level time, the source file's
+modified time is used, falling back to first detection in Asia/Kolkata. Stable
+chemistry fingerprints and assignments are stored atomically in
+`output/rm/sinter_state.json` so reruns are idempotent. BF-01 OFFLINE remains
+`sinter_2`, and the existing BF-02 `sinter_4` behavior is unchanged. If two new
+source events have exactly the same timestamp, the source label is used only as
+a deterministic tie-breaker and a warning is logged.
 
 Run all profile 1 jobs together:
 
 ```powershell
-.\.venv\Scripts\python.exe src\app.py --mode charge,dpr,rm_hm,rm_stock,ash --today
+.\.venv\Scripts\python.exe src\app.py --mode charge,dpr,rm_strength,rm_stock,ash --today
 ```
+
+`rm_strength` downloads `01 COKE OVEN...` and `02 SP-02 PRODUCT...` as one
+profile-1 job. Coke uses column B for the date, midnight as its configured
+default time, and Q/R/Z/AA for M-40/M-10/CRI/CSR. SP-02 combines column A with
+the Report Time in D and reads TI/AI/RDI/RI only from AG/AH/AI/AJ; AK and AL
+are deliberately ignored. Values are stored as observed, without forward fill.
 
 Run all profile 2 jobs together:
 
@@ -185,7 +200,7 @@ Common output locations:
 - `output/fines_analysis`
 - `output/dpr`
 - `output/hot_metal`
-- `output/rm_hm`
+- `output/rm_strength`
 - `output/dust`
 - `output/ash`
 - `outputs` for charge reports

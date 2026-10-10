@@ -5,11 +5,13 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from domains.rm.neon_mapper import RMNeonMapper
 from domains.rm.reader import RMReader
+from domains.rm.sinter_processor import RMSinterProcessor
 from domains.rm.transformer import RMTransformer
 from infrastructure.database_targets import (
     DatabaseTarget,
@@ -28,6 +30,7 @@ DEFAULT_SHIFT_PRIORITY = {"C": 0, "A": 1, "B": 2}
 DEFAULT_SHIFT_TIME = {"A": "07:00", "B": "15:00", "C": "23:00"}
 INFLUX_REQUIRED_KEYS = ("url", "token", "org", "bucket")
 NEON_NUMERIC_EXCLUDE = {"date", "date_time", "material_code"}
+BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 
 
 class RMService:
@@ -50,39 +53,93 @@ class RMService:
         self.logger.info("RM processing started")
 
         frames = []
+        sinter_source_frames: dict[str, list[pd.DataFrame]] = {"BF1": [], "BF2": []}
+        source_modified_at: dict[str, datetime] = {}
         if rm_file:
-            frames.extend(self.reader.read(rm_file, rm_cfg["sheet_config"]))
-        if sinter_file:
-            frames.extend(
-                self.reader.read(sinter_file, rm_cfg["sinter_sheet_config"])
+            rm_frames = self.reader.read(rm_file, rm_cfg["sheet_config"])
+            frames.extend(rm_frames)
+            bf2_prefix = rm_cfg["sheet_config"]["SINTER"].get("col_prefix")
+            sinter_source_frames["BF2"].extend(
+                frame.copy()
+                for frame, prefix, _ in rm_frames
+                if prefix == bf2_prefix
             )
+            source_modified_at["BF2"] = self._file_modified_at(rm_file)
+        if sinter_file:
+            bf1_frames = self.reader.read(
+                sinter_file,
+                rm_cfg["sinter_sheet_config"],
+            )
+            frames.extend(bf1_frames)
+            sinter_source_frames["BF1"].extend(
+                frame.copy() for frame, _, _ in bf1_frames
+            )
+            source_modified_at["BF1"] = self._file_modified_at(sinter_file)
+
+        sinter_processor = RMSinterProcessor(
+            logger=self.logger,
+            state_path=rm_cfg.get(
+                "sinter_state_file",
+                output_dir / "sinter_state.json",
+            ),
+        )
+        sinter_batch = sinter_processor.prepare(
+            source_frames=sinter_source_frames,
+            run_dates=run_date_list,
+            source_modified_at=source_modified_at,
+        )
+
         parts = self._process_sheets(
             frames=frames,
             run_dates=run_date_list,
             invalid_markers=rm_cfg.get("invalid_markers"),
         )
-        if not parts:
+        if not parts and sinter_batch.rows.empty:
             self.logger.error("No RM data produced - exiting")
             return pd.DataFrame()
 
-        combined = self._combine_parts(parts)
-        combined = self._rename_for_output(combined, rm_cfg)
-        self._write_raw_output(combined, output_dir)
+        neon_df = pd.DataFrame()
+        if parts:
+            combined = self._combine_parts(parts)
+            combined = self._rename_for_output(combined, rm_cfg)
+            self._write_raw_output(combined, output_dir)
 
-        combined = self._build_final_frame(combined, rm_cfg)
-        if combined.empty:
-            return combined
+            combined = self._build_final_frame(combined, rm_cfg)
+            if combined.empty and sinter_batch.rows.empty:
+                return combined
+            if not combined.empty:
+                combined = self._select_output_columns(combined, rm_cfg)
+                self._write_final_output(combined, output_dir, output_filename)
+                self._write_to_influx(combined, setting_cfg, rm_cfg)
+                neon_df = self._coerce_numeric_for_neon(combined.copy())
 
-        combined = self._select_output_columns(combined, rm_cfg)
-        self._write_final_output(combined, output_dir, output_filename)
-
-        self._write_to_influx(combined, setting_cfg, rm_cfg)
-
-        neon_df = self._coerce_numeric_for_neon(combined.copy())
-        self._push_to_database_targets(neon_df, setting_cfg, rm_cfg)
+        sinter_processor.stage(sinter_batch)
+        target_results = self._push_to_database_targets(
+            neon_df,
+            setting_cfg,
+            rm_cfg,
+            sinter_batch.rows,
+        )
+        if sinter_batch.pending_keys:
+            expected_rows = len(sinter_batch.rows)
+            all_sinter_rows_written = bool(target_results) and all(
+                sinter_rows == expected_rows
+                for _, sinter_rows in target_results.values()
+            )
+            if all_sinter_rows_written:
+                sinter_processor.commit(sinter_batch)
+            else:
+                self.logger.warning(
+                    "RM Sinter state remains pending because no PostgreSQL target "
+                    "accepted every prepared Sinter row"
+                )
 
         self.logger.info("RM processing completed successfully")
         return neon_df
+
+    @staticmethod
+    def _file_modified_at(file_path: str) -> datetime:
+        return datetime.fromtimestamp(Path(file_path).stat().st_mtime, BUSINESS_TZ)
 
     def _output_settings(self, rm_cfg: dict[str, Any]) -> tuple[Path, str]:
         output_cfg = rm_cfg.get("output", {})
@@ -351,20 +408,27 @@ class RMService:
         df: pd.DataFrame,
         setting_cfg: dict[str, Any],
         rm_cfg: dict[str, Any],
-    ) -> None:
-        def writer(client: NeonClient, target: DatabaseTarget) -> int:
-            rows = self._sync_neon_tables(client, df, rm_cfg)
+        sinter_df: pd.DataFrame | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        def writer(client: NeonClient, target: DatabaseTarget) -> tuple[int, int]:
+            rows, sinter_rows = self._sync_neon_tables(
+                client,
+                df,
+                rm_cfg,
+                sinter_df=sinter_df,
+            )
             self.logger.info(f"RM synced to {target.label}: {rows} rows")
-            return rows
+            return rows, sinter_rows
 
-        write_to_database_targets(setting_cfg, self.logger, "RM", writer)
+        return write_to_database_targets(setting_cfg, self.logger, "RM", writer)
 
     def _sync_neon_tables(
         self,
         neon_client: NeonClient,
         df: pd.DataFrame,
         rm_cfg: dict[str, Any],
-    ) -> int:
+        sinter_df: pd.DataFrame | None = None,
+    ) -> tuple[int, int]:
         rm_neon_cfg = rm_cfg.get("neon", {})
         category_map = rm_neon_cfg.get("category_map", {})
         schema = rm_neon_cfg.get("schema", "offline_feed")
@@ -387,6 +451,8 @@ class RMService:
         table_names = {
             mapping["table"] for mapping in category_map.values() if "table" in mapping
         }
+        if sinter_df is not None and not sinter_df.empty:
+            table_names.add("sinter_chemistry")
         table_columns = neon_client.fetch_table_columns(schema, table_names)
         missing_tables = sorted(
             table for table in table_names if not table_columns.get(table)
@@ -419,4 +485,55 @@ class RMService:
                 self.logger.exception(f"    Failed for {table_name}")
                 raise
 
-        return total_rows
+        sinter_rows = 0
+        if sinter_df is not None and not sinter_df.empty:
+            material_code = "sinter_3"
+            if material_codes and material_code.lower() not in {
+                str(code).lower() for code in material_codes
+            }:
+                self.logger.warning(
+                    f"Material code not found in master table: {material_code}"
+                )
+            else:
+                table = "sinter_chemistry"
+                valid_columns = table_columns[table]
+                required_columns = {"date_time", "material_code"}
+                missing_required = required_columns - valid_columns
+                if missing_required:
+                    raise RuntimeError(
+                        f"RM Sinter target {schema}.{table} is missing required "
+                        f"columns: {sorted(missing_required)}"
+                    )
+
+                skipped_columns = [
+                    column
+                    for column in sinter_df.columns
+                    if column not in valid_columns
+                ]
+                for column in skipped_columns:
+                    self.logger.warning(
+                        f"Skipping RM Sinter property '{column}'; column not in target table"
+                    )
+                selected_columns = [
+                    column
+                    for column in sinter_df.columns
+                    if column in valid_columns
+                ]
+                table_df = sinter_df[selected_columns].copy()
+                target_table = f"{schema}.{table}" if schema else table
+                try:
+                    sinter_rows = neon_client.insert_dataframe(
+                        df=table_df,
+                        table_name=target_table,
+                        conflict_cols=conflict_cols,
+                        upsert_mode=upsert_mode,
+                    )
+                    total_rows += sinter_rows
+                    self.logger.info(
+                        f"    {target_table}: {sinter_rows} dedicated Sinter rows synced"
+                    )
+                except Exception:
+                    self.logger.exception(f"    Failed for {target_table}")
+                    raise
+
+        return total_rows, sinter_rows

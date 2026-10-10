@@ -21,7 +21,7 @@ from domains.rm.service import RMService
 from domains.fines_analysis.service import FinesAnalysisService
 from domains.dpr.service import DPRService
 from domains.hot_metal.service import HotMetalService
-from domains.rm_hm.service import RMHMService
+from domains.rm_strength.service import RMStrengthService
 from domains.rm_stock.service import RMStockService
 from domains.charge.service import ChargeService, ChargeServiceConfig
 from domains.dust.service import DustService
@@ -37,11 +37,12 @@ DUST_CHEMICAL_PATTERNS = (
     "*GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS*.xlsx",
 )
 ASH_PATTERNS = ("*ASH ANALYSIS*.xlsx",)
+COKE_OVEN_PATTERNS = ("*COKE OVEN*.xls*",)
+SP02_PRODUCT_PATTERNS = ("*SP-02 PRODUCT*.xls*",)
 MODE_FILE_PATTERNS = {
     "fines_analysis": BF02_BUNKER_PATTERNS,
     "dpr": ("*DPR*.xlsx",),
     "hot_metal": ("*HOT METAL*.xlsx",),
-    "rm_hm": ("*RM & HM*.xlsx",),
     "rm_stock": RM_STOCK_BULK_PATTERNS,
     "charge": ("CHARGE_AND_DUMP_REPORT_*.xlsx",),
     "ash": ASH_PATTERNS,
@@ -59,7 +60,7 @@ def parse_args():
         required=True,
         help=(
             "Comma separated modes. Supported: rm, fines_analysis, dpr, "
-            "hot_metal, rm_hm, rm_stock, charge, dust, ash"
+            "hot_metal, rm_strength, rm_stock, charge, dust, ash"
         ),
     )
 
@@ -236,6 +237,31 @@ def _rm_source_files(
     for label, path in zip(("BF-02 RM", "BF-01 sinter chemistry"), files):
         log = logger.info if path else logger.warning
         log(f"rm: {label} source file: {path or 'not found'}")
+    return files
+
+
+def _rm_strength_source_files(
+    *,
+    skip_download: bool,
+    download_dir: Path,
+    download_result: DownloadResult | None,
+    logger,
+) -> tuple[Path | None, Path | None]:
+    downloaded = [] if skip_download else _downloaded_files_for_mode(
+        "rm_strength", download_result, logger
+    )
+    resolver = (
+        lambda patterns: _latest_existing_file(download_dir, patterns)
+        if skip_download
+        else _latest_matching_file(downloaded, patterns)
+    )
+    files = tuple(
+        resolver(patterns)
+        for patterns in (COKE_OVEN_PATTERNS, SP02_PRODUCT_PATTERNS)
+    )
+    for label, path in zip(("coke", "SP-02 sinter"), files):
+        log = logger.info if path else logger.warning
+        log(f"rm_strength: {label} source file: {path or 'not found'}")
     return files
 
 
@@ -493,7 +519,7 @@ def main():
         "fines_analysis",
         "dpr",
         "hot_metal",
-        "rm_hm",
+        "rm_strength",
         "charge",
         "rm_stock",
         "dust",
@@ -602,22 +628,26 @@ def main():
             HotMetalService(logger).process(str(hm_file), cfg, run_dates)
 
     # -------------------------------------------------
-    # RM & HM
+    # RM STRENGTH
     # -------------------------------------------------
-    if "rm_hm" in modes:
-        rm_hm_file = _source_file_for_mode(
-            "rm_hm",
+    if "rm_strength" in modes:
+        coke_file, sinter_file = _rm_strength_source_files(
             skip_download=args.skip_download,
             download_dir=download_dir,
             download_result=download_result,
             logger=logger,
         )
-        if rm_hm_file:
-            RMHMService(
+        if coke_file or sinter_file:
+            RMStrengthService(
                 logger,
                 neon_cfg=cfg["neon_developer"],
                 write_to_neon=True,
-            ).process(str(rm_hm_file), cfg, run_dates)
+            ).process(
+                coke_file=str(coke_file) if coke_file else None,
+                sinter_file=str(sinter_file) if sinter_file else None,
+                setting_cfg=cfg,
+                run_dates=run_dates,
+            )
 
     # -------------------------------------------------
     # RM STOCK

@@ -25,7 +25,7 @@ eml:
       user: ${EML_PROFILE_1_USER}
       password: ${EML_PROFILE_1_PASSWORD}
       file_station_search_path: "/V-Optimaise Data/"
-      modes: [charge, dpr, rm_hm, rm_stock, ash]
+      modes: [charge, dpr, rm_strength, rm_stock, ash]
     profile_2:
       user: ${EML_PROFILE_2_USER}
       password: ${EML_PROFILE_2_PASSWORD}
@@ -40,7 +40,8 @@ portal_files:
   fines_analysis: "BF-02 BUNKER"
   dpr: "BF-02 DPR"
   hot_metal: "BF-02- HOT METAL, SLAG"
-  rm_hm: "RM & HM"
+  rm_strength_coke: "01 COKE OVEN"
+  rm_strength_sinter: "02 SP-02 PRODUCT"
   rm_stock: "RM BULK STOCK"
   rm_stock_sinter: "DPR SP#2"
   dust_basic: "BF-02 BUNKER"

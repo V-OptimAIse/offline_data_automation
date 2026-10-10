@@ -55,7 +55,8 @@ class PortalFilenameMatchingTests(unittest.TestCase):
             "BF-02 BUNKER": "12 BF-02 BUNKER 2027-28 Rev 2.xlsx",
             "BF-01 BUNKER": "11 BF-01 BUNKER 2027-28 Rev 2.xlsx",
             "BF-02 DPR": "BF-02 DPR Sep'27.xlsx",
-            "RM & HM": "RM &amp; HM 2027-28.xlsx",
+            "01 COKE OVEN": "01 COKE OVEN 2027-28.xlsx",
+            "02 SP-02 PRODUCT": "02 SP-02 PRODUCT 2027-28.xlsx",
             "RM BULK STOCK": "RM BULK STOCK Sep'2027.xls",
             "GCP DUST CATCHER": (
                 "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS 27-28.xlsx"
@@ -106,7 +107,8 @@ class PortalFilenameMatchingTests(unittest.TestCase):
         self.assertEqual(portal_files["rm"], "BF-02 BUNKER")
         self.assertEqual(portal_files["rm_sinter"], "BF-01 BUNKER")
         self.assertEqual(portal_files["dpr"], "BF-02 DPR")
-        self.assertEqual(portal_files["rm_hm"], "RM & HM")
+        self.assertEqual(portal_files["rm_strength_coke"], "01 COKE OVEN")
+        self.assertEqual(portal_files["rm_strength_sinter"], "02 SP-02 PRODUCT")
         self.assertEqual(portal_files["rm_stock"], "RM BULK STOCK")
         self.assertEqual(portal_files["dust_chemical"], "GCP DUST CATCHER")
         self.assertEqual(portal_files["ash"], "ASH ANALYSIS")
@@ -145,6 +147,42 @@ class PortalDownloadRetryTests(unittest.TestCase):
             [
                 (["bf-02", "bunker"], "BF-02 BUNKER"),
                 (["bf-01", "bunker"], "BF-01 BUNKER"),
+            ],
+        )
+
+    def test_rm_strength_downloads_coke_and_sinter_as_one_mode(self):
+        downloader = PortalDownloader(
+            Mock(),
+            DownloadConfig(
+                download_dir="downloads",
+                metadata_path="metadata.json",
+                file_station_url="https://portal.example/files",
+                hourly_url="https://portal.example/hourly",
+                portal_files={
+                    "rm_strength_coke": "01 COKE OVEN",
+                    "rm_strength_sinter": "02 SP-02 PRODUCT",
+                },
+            ),
+            LOGGER,
+        )
+        downloader._safe_download = Mock(
+            side_effect=[
+                DownloadOutcome(status="downloaded", paths=("coke.xlsx",)),
+                DownloadOutcome(status="downloaded", paths=("sinter.xlsx",)),
+            ]
+        )
+
+        result = downloader.download(["rm_strength"], ["28-Sep-2026"], False)
+
+        self.assertEqual(
+            result.by_mode["rm_strength"].paths,
+            ("coke.xlsx", "sinter.xlsx"),
+        )
+        self.assertEqual(
+            [call.args[1:] for call in downloader._safe_download.call_args_list],
+            [
+                (["coke", "oven"], "01 COKE OVEN"),
+                (["sp-02", "product"], "02 SP-02 PRODUCT"),
             ],
         )
 

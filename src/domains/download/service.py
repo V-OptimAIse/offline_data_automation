@@ -1239,7 +1239,6 @@ class PortalDownloader:
                 "fines_analysis": ["bf-02", "bunker"],
                 "dpr": ["bf-02", "dpr"],
                 "hot_metal": ["bf-02", "hot", "metal"],
-                "rm_hm": ["rm", "hm"],
                 "rm_stock": ["bulk", "stock"],
             }
 
@@ -1271,6 +1270,20 @@ class PortalDownloader:
                         cached_download(["bf-02", "bunker"], portal_files.get("rm")),
                         cached_download(
                             ["bf-01", "bunker"], portal_files.get("rm_sinter")
+                        ),
+                    ])
+                    continue
+
+                if m == "rm_strength":
+                    portal_files = self.cfg.portal_files or {}
+                    outcomes[m] = _combine_download_outcomes([
+                        cached_download(
+                            ["coke", "oven"],
+                            portal_files.get("rm_strength_coke"),
+                        ),
+                        cached_download(
+                            ["sp-02", "product"],
+                            portal_files.get("rm_strength_sinter"),
                         ),
                     ])
                     continue

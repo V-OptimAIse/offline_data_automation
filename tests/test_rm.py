@@ -84,7 +84,7 @@ class RMSinterReaderTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "SINTER_SP_01_%FE(T)_ON"], 54.4)
         self.assertEqual(result.loc[0, "SINTER_SP_01_%FE(T)_OFF"], 53.2)
 
-    def test_bf01_and_bf02_chemistry_use_their_own_material_codes(self):
+    def test_online_sinter_is_not_written_by_the_generic_mapper(self):
         frame = pd.DataFrame(
             {
                 "date": pd.to_datetime(["2026-09-28 07:00"]),
@@ -101,10 +101,10 @@ class RMSinterReaderTests(unittest.TestCase):
 
         outputs = list(mapper.iter_table_dfs(frame))
 
-        self.assertEqual(len(outputs), 4)
+        self.assertEqual(len(outputs), 2)
         self.assertEqual(
             {result["material_code"].iloc[0] for _, result in outputs},
-            {"sinter_1", "sinter_2", "sinter_3", "sinter_4"},
+            {"sinter_2", "sinter_4"},
         )
         self.assertTrue(all(table == "sinter_chemistry" for table, _ in outputs))
 

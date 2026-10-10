@@ -1,0 +1,45 @@
+rm_strength:
+  run_date_format: "%d-%b-%Y"
+
+  output:
+    dir: output/rm_strength
+    filename: combined_rm_strength_data.xlsx
+
+  neon:
+    schema: offline_feed
+    table: raw_material_strength_analysis
+    conflict_cols: [material_code, date_time]
+    upsert_mode: update_insert
+    material_master:
+      schema: plant_master
+      table: material_property_mapping
+      code_column: material_code
+      active_column:
+
+  sources:
+    coke:
+      material_code: coke_1
+      sheet_name: COKE
+      header_row: 2
+      date_column: B
+      date_name: Date
+      default_time: "00:00"
+      fields:
+        Q: {name: M-40, target: property_1}
+        R: {name: M-10, target: property_2}
+        Z: {name: CRI, target: property_3}
+        AA: {name: CSR, target: property_4}
+
+    sinter:
+      material_code: sinter_3
+      sheet_name_format: "%b-%y"
+      header_row: 2
+      date_column: A
+      date_name: Date
+      time_column: D
+      time_name: Report Time
+      fields:
+        AG: {name: TI, target: property_2}
+        AH: {name: AI, target: property_1}
+        AI: {name: RDI, target: property_3}
+        AJ: {name: RI, target: property_4}

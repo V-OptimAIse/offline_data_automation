@@ -23,7 +23,7 @@ def _eml_config() -> dict:
                 "user": "first-user",
                 "password": "first-password",
                 "file_station_search_path": "/V-Optimaise Data/",
-                "modes": ["charge", "dpr", "rm_hm", "rm_stock", "ash"],
+                "modes": ["charge", "dpr", "rm_strength", "rm_stock", "ash"],
             },
             "profile_2": {
                 "user": "second-user",
@@ -41,7 +41,7 @@ class PortalProfileRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             set(profiles["profile_1"]["modes"]),
-            {"charge", "dpr", "rm_hm", "rm_stock", "ash"},
+            {"charge", "dpr", "rm_strength", "rm_stock", "ash"},
         )
         self.assertEqual(
             set(profiles["profile_2"]["modes"]),
