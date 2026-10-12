@@ -1,0 +1,15 @@
+[Unit]
+Description=Offline Data Synology Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voptimaise
+WorkingDirectory=/path/to/offline_data_automation
+ExecStart=/path/to/offline_data_automation/.venv/bin/python src/monitor.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

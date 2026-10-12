@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
-import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
@@ -55,10 +55,10 @@ def _frame(
 
 class RMSinterEventTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory(
-            dir=Path(__file__).resolve().parent,
-        )
-        self.state_path = Path(self.temp_dir.name) / "sinter_state.json"
+        self.temp_dir = Path(__file__).resolve().parent / ".rm-sinter-test-data"
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.temp_dir.mkdir()
+        self.state_path = self.temp_dir / "sinter_state.json"
         self.processor = RMSinterProcessor(
             LOGGER,
             self.state_path,
@@ -66,7 +66,7 @@ class RMSinterEventTests(unittest.TestCase):
         )
 
     def tearDown(self):
-        self.temp_dir.cleanup()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _prepare(self, sources, modified=None, run_dates=None):
         return self.processor.prepare(

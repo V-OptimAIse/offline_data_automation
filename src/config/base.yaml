@@ -1,7 +1,5 @@
 download:
   download_dir: "~/Downloads"
-  metadata_path: "downloaded_metadata.json"   # keep same filename (easy migration)
-  default_timeout: 180
 
 logging:
   level: INFO
@@ -17,9 +15,8 @@ write_db: [pi_db, neon_db]
 
 
 eml:
-  login_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/"
-  file_station_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/?launchApp=SYNO.SDS.App.FileStation3.Instance&SynoToken=laNlkmozfCC0g"
-  hourly_url: "https://ithelpdesk-ugml.sg4.quickconnect.to/index.cgi?launchApp=SYNO.SDS.App.FileStation3.Instance&launchParam=openfile%3D%252FV-Optimaise%2520Data%252FBF2%2520AUTO%2520REPORTS%252FCHARGE%2520AND%2520DUMP%252FHOURLY%252F"
+  base_url: "https://ithelpdesk-ugml.sg4.quickconnect.to"
+  charge_folder_path: "/V-Optimaise Data/BF2 AUTO REPORTS/CHARGE AND DUMP/HOURLY"
   profiles:
     profile_1:
       user: ${EML_PROFILE_1_USER}
@@ -31,6 +28,16 @@ eml:
       password: ${EML_PROFILE_2_PASSWORD}
       file_station_search_path: "/QC_LAB_DATA"
       modes: [rm, fines_analysis, hot_metal, dust]
+
+monitor:
+  poll_interval_seconds: 60
+  stability_delay_seconds: 10
+  state_path: "output/state/synology_monitor_state.json"
+  process_initial_snapshot: false
+  request_timeout_seconds: 30
+  download_timeout_seconds: 300
+  retry_attempts: 3
+  retry_backoff_seconds: 5
 
 # Stable identifiers used to find portal files. Text after these identifiers
 # (financial year, month, revision, and extension) may change freely.

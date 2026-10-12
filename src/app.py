@@ -8,12 +8,12 @@ from zoneinfo import ZoneInfo
 from core.config_loader import load_config
 from core.logging import configure_logging
 from core.portal_profiles import PortalProfileConfigError, resolve_portal_profile_jobs
-from infrastructure.selenium_client import SeleniumClient, SeleniumConfig
+from infrastructure.synology_api_client import SynologyApiClient
 from domains.download.service import (
     DownloadConfig,
     DownloadResult,
-    PortalDownloader,
-    format_portal_filename,
+    SynologyDownloader,
+    ash_expected_name,
     is_excel_lock_file,
 )
 
@@ -80,7 +80,7 @@ def parse_args():
         "--skip",
         action="store_true",
         dest="skip_download",
-        help="Skip Selenium download step (use existing files)",
+        help="Skip Synology API download step (use existing local files)",
     )
 
     return parser.parse_args()
@@ -382,7 +382,7 @@ def _ash_source_files(
         ]
         expected_names = tuple(
             dict.fromkeys(
-                format_portal_filename(filename_template, run_date)
+                ash_expected_name(filename_template, run_date)
                 for run_date in run_dates
             )
         )
@@ -441,40 +441,40 @@ def _download_for_profiles(
 
     for profile_job in profile_jobs:
         logger.info(
-            f"Starting portal profile {profile_job.name} for modes: "
+            f"Starting Synology profile {profile_job.name} for modes: "
             f"{', '.join(profile_job.modes)}"
         )
-        selenium = SeleniumClient(
-            SeleniumConfig(default_timeout=int(cfg["download"]["default_timeout"]))
+        monitor_cfg = cfg.get("monitor") or {}
+        client = SynologyApiClient(
+            cfg["eml"]["base_url"],
+            profile_job.user,
+            profile_job.password,
+            request_timeout_seconds=int(
+                monitor_cfg.get("request_timeout_seconds", 30)
+            ),
+            download_timeout_seconds=int(
+                monitor_cfg.get("download_timeout_seconds", 300)
+            ),
+            retry_attempts=int(monitor_cfg.get("retry_attempts", 3)),
+            retry_backoff_seconds=float(
+                monitor_cfg.get("retry_backoff_seconds", 5)
+            ),
         )
         download_config = DownloadConfig(
             download_dir=cfg["download"]["download_dir"],
-            metadata_path=cfg["download"]["metadata_path"],
-            file_station_url=cfg["eml"]["file_station_url"],
-            hourly_url=cfg["eml"]["hourly_url"],
-            file_station_search_path=profile_job.file_station_search_path,
+            folder_path=profile_job.file_station_search_path,
+            charge_folder_path=cfg["eml"]["charge_folder_path"],
             portal_files=cfg.get("portal_files", {}),
         )
-        downloader = PortalDownloader(
-            selenium,
+        downloader = SynologyDownloader(
+            client,
             download_config,
             logger,
         )
 
         try:
-            logger.info(
-                f"Starting browser and logging in with portal profile "
-                f"{profile_job.name}"
-            )
-            selenium.login(
-                login_url=cfg["eml"]["login_url"],
-                user=profile_job.user,
-                password=profile_job.password,
-            )
-            logger.info(
-                f"Portal profile {profile_job.name} login successful; "
-                "moving to File Station download flow"
-            )
+            client.login()
+            logger.info("Connected %s", profile_job.name)
 
             profile_result = downloader.download(
                 modes=list(profile_job.modes),
@@ -490,9 +490,174 @@ def _download_for_profiles(
                 f"Failed modes: {sorted(profile_result.failed_modes)}"
             )
         finally:
-            selenium.stop()
+            client.logout()
 
     return DownloadResult(by_mode=outcomes)
+
+
+def run_processing(
+    modes: list[str],
+    run_dates: list[str],
+    cfg: dict,
+    logger,
+    download_result: DownloadResult | None = None,
+    *,
+    skip_download: bool = False,
+) -> None:
+    """Run existing domain services against downloaded or existing local files."""
+    download_dir = Path(cfg["download"]["download_dir"]).expanduser()
+
+    if "rm" in modes:
+        rm_file, rm_sinter_file = _rm_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if rm_file or rm_sinter_file:
+            RMService(logger).process(
+                str(rm_file) if rm_file else None,
+                cfg,
+                run_dates,
+                str(rm_sinter_file) if rm_sinter_file else None,
+            )
+
+    if "fines_analysis" in modes:
+        source = _source_file_for_mode(
+            "fines_analysis",
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if source:
+            FinesAnalysisService(logger).process(str(source), cfg, run_dates)
+
+    if "dpr" in modes:
+        source = _source_file_for_mode(
+            "dpr",
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if source:
+            DPRService(logger).process(str(source), cfg, run_dates)
+
+    if "hot_metal" in modes:
+        source = _source_file_for_mode(
+            "hot_metal",
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if source:
+            HotMetalService(logger).process(str(source), cfg, run_dates)
+
+    if "rm_strength" in modes:
+        coke_file, sinter_file = _rm_strength_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if coke_file or sinter_file:
+            RMStrengthService(
+                logger,
+                neon_cfg=cfg["neon_developer"],
+                write_to_neon=True,
+            ).process(
+                coke_file=str(coke_file) if coke_file else None,
+                sinter_file=str(sinter_file) if sinter_file else None,
+                setting_cfg=cfg,
+                run_dates=run_dates,
+            )
+
+    if "rm_stock" in modes:
+        stock_file, sinter_stock_file = _rm_stock_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if stock_file:
+            RMStockService(logger).process(
+                file_path=str(stock_file),
+                cfg=cfg,
+                run_dates=run_dates,
+                sinter_file_path=(
+                    str(sinter_stock_file) if sinter_stock_file else None
+                ),
+            )
+
+    if "charge" in modes:
+        charge_files = _charge_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        charge_service = ChargeService(
+            ChargeServiceConfig(
+                output_dir="outputs",
+                neon_cfg=cfg["neon_developer"],
+                setting_cfg=cfg,
+                charge_yaml_path="src/config/charge.yaml",
+                write_to_neon=True,
+            ),
+            logger,
+        )
+        for run_date in run_dates:
+            charge_file = _charge_file_for_date(charge_files, run_date)
+            if not charge_file:
+                if skip_download:
+                    logger.error("Charge file not found for %s", run_date)
+                else:
+                    logger.info(
+                        "Charge file not downloaded for %s; skipping read/DB write",
+                        run_date,
+                    )
+                continue
+            charge_service.run(
+                charge_file=str(charge_file),
+                run_date_str=run_date,
+            )
+
+    if "dust" in modes:
+        basic_file, chemical_file = _dust_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            logger=logger,
+        )
+        if basic_file or chemical_file:
+            DustService(logger).process(
+                basic_file=str(basic_file) if basic_file else None,
+                chemical_file=str(chemical_file) if chemical_file else None,
+                setting_cfg=cfg,
+                run_dates=run_dates,
+            )
+
+    if "ash" in modes:
+        ash_files = _ash_source_files(
+            skip_download=skip_download,
+            download_dir=download_dir,
+            download_result=download_result,
+            run_dates=run_dates,
+            filename_template=(cfg.get("portal_files") or {}).get(
+                "ash", "ASH ANALYSIS {financial_year_short}"
+            ),
+            logger=logger,
+        )
+        if ash_files:
+            AshService(logger).process(
+                file_paths=[str(path) for path in ash_files],
+                setting_cfg=cfg,
+                run_dates=run_dates,
+            )
+
+    logger.info("Offline data automation completed successfully.")
 
 
 # -------------------------------------------------
@@ -538,7 +703,6 @@ def main():
         f"Run dates resolved: {run_dates[0]} to {run_dates[-1]} "
         f"({len(run_dates)} day(s))"
     )
-    download_dir = Path(cfg["download"]["download_dir"]).expanduser()
 
     # -------------------------------------------------
     # DOWNLOAD STEP (OPTIONAL)
@@ -567,189 +731,14 @@ def main():
             f"Failed modes: {sorted(download_result.failed_modes)}"
         )
 
-    # -------------------------------------------------
-    # RM
-    # -------------------------------------------------
-    if "rm" in modes:
-        rm_file, rm_sinter_file = _rm_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if rm_file or rm_sinter_file:
-            RMService(logger).process(
-                str(rm_file) if rm_file else None,
-                cfg,
-                run_dates,
-                str(rm_sinter_file) if rm_sinter_file else None,
-            )
-
-    # -------------------------------------------------
-    # FINES ANALYSIS
-    # -------------------------------------------------
-    if "fines_analysis" in modes:
-        fines_file = _source_file_for_mode(
-            "fines_analysis",
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if fines_file:
-            FinesAnalysisService(logger).process(str(fines_file), cfg, run_dates)
-
-    # -------------------------------------------------
-    # DPR
-    # -------------------------------------------------
-    if "dpr" in modes:
-        dpr_file = _source_file_for_mode(
-            "dpr",
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if dpr_file:
-            DPRService(logger).process(str(dpr_file), cfg, run_dates)
-
-    # -------------------------------------------------
-    # HOT METAL
-    # -------------------------------------------------
-    if "hot_metal" in modes:
-        hm_file = _source_file_for_mode(
-            "hot_metal",
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if hm_file:
-            HotMetalService(logger).process(str(hm_file), cfg, run_dates)
-
-    # -------------------------------------------------
-    # RM STRENGTH
-    # -------------------------------------------------
-    if "rm_strength" in modes:
-        coke_file, sinter_file = _rm_strength_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if coke_file or sinter_file:
-            RMStrengthService(
-                logger,
-                neon_cfg=cfg["neon_developer"],
-                write_to_neon=True,
-            ).process(
-                coke_file=str(coke_file) if coke_file else None,
-                sinter_file=str(sinter_file) if sinter_file else None,
-                setting_cfg=cfg,
-                run_dates=run_dates,
-            )
-
-    # -------------------------------------------------
-    # RM STOCK
-    # -------------------------------------------------
-    if "rm_stock" in modes:
-        stock_file, sinter_stock_file = _rm_stock_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-
-        if stock_file:
-            RMStockService(logger).process(
-                file_path=str(stock_file),
-                cfg=cfg,
-                run_dates=run_dates,
-                sinter_file_path=str(sinter_stock_file) if sinter_stock_file else None,
-            )
-
-    # -------------------------------------------------
-    # CHARGE
-    # -------------------------------------------------
-    if "charge" in modes:
-        charge_files = _charge_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-
-        charge_service = ChargeService(
-            ChargeServiceConfig(
-                output_dir="outputs",
-                neon_cfg=cfg["neon_developer"],
-                setting_cfg=cfg,
-                charge_yaml_path="src/config/charge.yaml",
-                write_to_neon=True,
-            ),
-            logger,
-        )
-
-        for run_date in run_dates:
-            charge_file = _charge_file_for_date(charge_files, run_date)
-
-            if not charge_file:
-                if args.skip_download:
-                    logger.error(f"Charge file not found for {run_date}")
-                else:
-                    logger.info(
-                        f"Charge file not downloaded for {run_date}; "
-                        "skipping read/DB write"
-                    )
-                continue
-
-            charge_service.run(
-                charge_file=str(charge_file),
-                run_date_str=run_date,
-            )
-
-    # -------------------------------------------------
-    # DUST ANALYSIS
-    # -------------------------------------------------
-    if "dust" in modes:
-        dust_basic_file, dust_chemical_file = _dust_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            logger=logger,
-        )
-        if dust_basic_file or dust_chemical_file:
-            DustService(logger).process(
-                basic_file=str(dust_basic_file) if dust_basic_file else None,
-                chemical_file=(
-                    str(dust_chemical_file) if dust_chemical_file else None
-                ),
-                setting_cfg=cfg,
-                run_dates=run_dates,
-            )
-
-    # -------------------------------------------------
-    # ASH ANALYSIS
-    # -------------------------------------------------
-    if "ash" in modes:
-        ash_files = _ash_source_files(
-            skip_download=args.skip_download,
-            download_dir=download_dir,
-            download_result=download_result,
-            run_dates=run_dates,
-            filename_template=(cfg.get("portal_files") or {}).get(
-                "ash",
-                "ASH ANALYSIS {financial_year_short}",
-            ),
-            logger=logger,
-        )
-        if ash_files:
-            AshService(logger).process(
-                file_paths=[str(path) for path in ash_files],
-                setting_cfg=cfg,
-                run_dates=run_dates,
-            )
-    logger.info("Offline data automation completed successfully.")
+    run_processing(
+        modes,
+        run_dates,
+        cfg,
+        logger,
+        download_result,
+        skip_download=args.skip_download,
+    )
 
 
 if __name__ == "__main__":

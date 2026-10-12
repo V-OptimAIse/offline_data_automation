@@ -26,3 +26,5 @@ charge:
 
   material_column_overrides:
     pci_1: pci_mt
+    online: coke_1_mt
+    coke_online: coke_1_mt

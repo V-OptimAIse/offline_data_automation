@@ -118,18 +118,18 @@ class PortalProfileRoutingTests(unittest.TestCase):
 
 
 class PortalProfileDownloadTests(unittest.TestCase):
-    @patch("app.PortalDownloader")
-    @patch("app.SeleniumClient")
+    @patch("app.SynologyDownloader")
+    @patch("app.SynologyApiClient")
     def test_mixed_profile_downloads_use_correct_logins_and_merge_results(
         self,
-        selenium_client_cls,
+        api_client_cls,
         downloader_cls,
     ):
         from app import _download_for_profiles
 
         profile_2_client = Mock()
         profile_1_client = Mock()
-        selenium_client_cls.side_effect = [profile_2_client, profile_1_client]
+        api_client_cls.side_effect = [profile_2_client, profile_1_client]
 
         profile_2_downloader = Mock()
         profile_1_downloader = Mock()
@@ -148,15 +148,18 @@ class PortalProfileDownloadTests(unittest.TestCase):
 
         cfg = {
             "download": {
-                "default_timeout": 180,
                 "download_dir": "downloads",
-                "metadata_path": "metadata.json",
+            },
+            "monitor": {
+                "request_timeout_seconds": 30,
+                "download_timeout_seconds": 300,
+                "retry_attempts": 3,
+                "retry_backoff_seconds": 5,
             },
             "eml": {
                 **_eml_config(),
-                "login_url": "https://portal.example/login",
-                "file_station_url": "https://portal.example/files",
-                "hourly_url": "https://portal.example/hourly",
+                "base_url": "https://synology.example",
+                "charge_folder_path": "/V-Optimaise Data/charge",
             },
             "portal_files": {},
         }
@@ -169,16 +172,14 @@ class PortalProfileDownloadTests(unittest.TestCase):
             logger=Mock(),
         )
 
-        profile_2_client.login.assert_called_once_with(
-            login_url="https://portal.example/login",
-            user="second-user",
-            password="second-password",
-        )
-        profile_1_client.login.assert_called_once_with(
-            login_url="https://portal.example/login",
-            user="first-user",
-            password="first-password",
-        )
+        profile_2_client.login.assert_called_once_with()
+        profile_1_client.login.assert_called_once_with()
+        self.assertEqual(api_client_cls.call_args_list[0].args[:3], (
+            "https://synology.example", "second-user", "second-password"
+        ))
+        self.assertEqual(api_client_cls.call_args_list[1].args[:3], (
+            "https://synology.example", "first-user", "first-password"
+        ))
         profile_2_downloader.download.assert_called_once_with(
             modes=["rm"],
             run_dates=["28-Aug-2026"],
@@ -192,16 +193,16 @@ class PortalProfileDownloadTests(unittest.TestCase):
         profile_2_download_config = downloader_cls.call_args_list[0].args[1]
         profile_1_download_config = downloader_cls.call_args_list[1].args[1]
         self.assertEqual(
-            profile_2_download_config.file_station_search_path,
+            profile_2_download_config.folder_path,
             "/QC_LAB_DATA",
         )
         self.assertEqual(
-            profile_1_download_config.file_station_search_path,
+            profile_1_download_config.folder_path,
             "/V-Optimaise Data/",
         )
         self.assertEqual(set(result.by_mode), {"rm", "charge"})
-        profile_2_client.stop.assert_called_once_with()
-        profile_1_client.stop.assert_called_once_with()
+        profile_2_client.logout.assert_called_once_with()
+        profile_1_client.logout.assert_called_once_with()
 
 
 if __name__ == "__main__":

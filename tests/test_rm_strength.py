@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
-import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,17 @@ from domains.rm_strength.service import RMStrengthService
 
 
 LOGGER = logging.getLogger("test_rm_strength")
+
+
+@contextmanager
+def test_directory(name: str):
+    path = Path(__file__).resolve().parent / name
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir()
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _write_coke_workbook(path: Path) -> None:
@@ -75,7 +87,7 @@ def _write_sinter_workbook(path: Path) -> None:
 
 class RMStrengthServiceTests(unittest.TestCase):
     def test_reads_exact_source_columns_and_preserves_missing_values(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+        with test_directory(".rm-strength-test-data-1") as temp_dir:
             root = Path(temp_dir)
             coke_path = root / "01 COKE OVEN 2026-27.xlsx"
             sinter_path = root / "02 SP-02 PRODUCT 2026-27.xlsx"
@@ -117,7 +129,7 @@ class RMStrengthServiceTests(unittest.TestCase):
             )
 
     def test_invalid_or_empty_strength_values_are_not_synthesized(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+        with test_directory(".rm-strength-test-data-2") as temp_dir:
             root = Path(temp_dir)
             coke_path = root / "01 COKE OVEN 2026-27.xlsx"
             _write_coke_workbook(coke_path)

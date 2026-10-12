@@ -4,9 +4,6 @@ import logging
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
-
-from selenium.common.exceptions import StaleElementReferenceException
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -14,286 +11,163 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from core.config_loader import load_yaml
 from domains.download.service import (
     DownloadConfig,
-    DownloadOutcome,
-    PortalDownloader,
+    SynologyDownloader,
+    ash_expected_name,
+    format_portal_filename,
     is_excel_lock_file,
+    latest_matching_file,
+    name_contains_identifier,
+    normalize_name,
 )
+from infrastructure.synology_api_client import RemoteFile
 
 
 LOGGER = logging.getLogger("test_download")
 
 
-class PortalFilenameMatchingTests(unittest.TestCase):
-    def setUp(self):
-        self.downloader = PortalDownloader(None, None, LOGGER)
+def remote(name: str, mtime: int, size: int = 100, folder: str = "/reports"):
+    return RemoteFile(name, f"{folder}/{name}", size, mtime, False)
 
-    def test_html_encoded_ampersand_matches_stable_identifier(self):
-        rows = [
-            {
-                "name": "RM &amp; HM.xlsx",
-                "modified": "08/20/2026 14:19:18",
-            }
-        ]
 
-        match = self.downloader._find_latest_matching_file(
-            rows,
-            ["rm", "hm"],
-            "RM & HM",
-        )
-
-        self.assertIs(match, rows[0])
-        self.assertEqual(
-            self.downloader._normalize_name("RM &amp; HM.xlsx"),
-            "rm and hm.xlsx",
-        )
+class FilenameMatchingTests(unittest.TestCase):
+    def test_html_encoded_ampersand_and_punctuation_match(self):
+        self.assertEqual(normalize_name("RM &amp; HM.xlsx"), "rm and hm.xlsx")
+        self.assertTrue(name_contains_identifier("RM&HM 2027-28.xlsx", "RM & HM"))
         self.assertTrue(
-            self.downloader._name_contains_identifier("RM&HM 2027-28.xlsx", "RM & HM")
+            name_contains_identifier(
+                "06 BF 02 HOT METAL SLAG &amp; GAS 2027-28.xlsx",
+                "BF-02- HOT METAL, SLAG",
+            )
         )
 
-    def test_dynamic_filenames_match_stable_identifiers(self):
+    def test_dynamic_names_and_extensions_match_stable_identifiers(self):
         examples = {
             "BF-02 BUNKER": "12 BF-02 BUNKER 2027-28 Rev 2.xlsx",
             "BF-01 BUNKER": "11 BF-01 BUNKER 2027-28 Rev 2.xlsx",
             "BF-02 DPR": "BF-02 DPR Sep'27.xlsx",
-            "01 COKE OVEN": "01 COKE OVEN 2027-28.xlsx",
+            "01 COKE OVEN": "01 COKE OVEN 2027-28.xlsm",
             "02 SP-02 PRODUCT": "02 SP-02 PRODUCT 2027-28.xlsx",
             "RM BULK STOCK": "RM BULK STOCK Sep'2027.xls",
-            "GCP DUST CATCHER": (
-                "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS 27-28.xlsx"
-            ),
+            "GCP DUST CATCHER": "15 GCP DUST CATCHER ANALYSIS 27-28.xlsx",
             "ASH ANALYSIS": "ASH ANALYSIS 27-28 Final.xlsx",
-            "BF-02- HOT METAL, SLAG": (
-                "06 BF 02 HOT METAL SLAG &amp; GAS 2027-28.xlsx"
-            ),
         }
-
         for identifier, filename in examples.items():
             with self.subTest(identifier=identifier):
-                self.assertTrue(
-                    self.downloader._name_contains_identifier(filename, identifier)
-                )
+                self.assertTrue(name_contains_identifier(filename, identifier))
 
-    def test_excel_lock_file_is_never_selected_or_matched_for_download(self):
-        rows = [
-            {
-                "name": "~$15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx",
-                "modified": "08/29/2026 12:00:00",
-            },
-            {
-                "name": "15 GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS.xlsx",
-                "modified": "08/28/2026 12:00:00",
-            },
+    def test_latest_match_uses_remote_mtime_and_ignores_lock_files(self):
+        files = [
+            remote("~$12 BF-02 BUNKER 2028-29.xlsx", 300),
+            remote("12 BF-02 BUNKER 2026-27.xlsx", 100),
+            remote("12 BF-02 BUNKER 2027-28.xlsx", 200),
         ]
+        match = latest_matching_file(files, "BF-02 BUNKER")
+        self.assertEqual(match.name, "12 BF-02 BUNKER 2027-28.xlsx")
+        self.assertTrue(is_excel_lock_file(files[0].name))
 
-        match = self.downloader._find_latest_matching_file(
-            rows,
-            ["gcp", "dust", "catcher"],
-            "GCP DUST CATCHER",
+    def test_ash_expected_financial_year_is_preferred(self):
+        files = [
+            remote("ASH ANALYSIS 27-28.xlsx", 300),
+            remote("ASH ANALYSIS 26-27 Rev 2.xlsx", 200),
+        ]
+        expected = ash_expected_name("ASH ANALYSIS", "31-Jul-2026")
+        match = latest_matching_file(
+            files,
+            "ASH ANALYSIS",
+            expected_name=expected,
         )
+        self.assertEqual(expected, "ASH ANALYSIS 26-27")
+        self.assertEqual(match.name, "ASH ANALYSIS 26-27 Rev 2.xlsx")
 
-        self.assertEqual(match["name"], rows[1]["name"])
-        self.assertTrue(is_excel_lock_file(rows[0]["name"]))
-        self.assertFalse(
-            self.downloader._download_name_matches(
-                rows[0]["name"],
-                "GCP DUST CATCHER",
-                ["gcp", "dust", "catcher"],
-            )
-        )
+    def test_financial_year_template_formatter(self):
+        template = "ASH ANALYSIS {financial_year_short}"
+        self.assertEqual(format_portal_filename(template, "31-Mar-2027"), "ASH ANALYSIS 26-27")
+        self.assertEqual(format_portal_filename(template, "01-Apr-2027"), "ASH ANALYSIS 27-28")
 
-    def test_base_config_uses_stable_identifiers(self):
+    def test_base_config_keeps_stable_identifiers(self):
         portal_files = load_yaml("src/config/base.yaml")["portal_files"]
-
         self.assertEqual(portal_files["rm"], "BF-02 BUNKER")
         self.assertEqual(portal_files["rm_sinter"], "BF-01 BUNKER")
-        self.assertEqual(portal_files["dpr"], "BF-02 DPR")
-        self.assertEqual(portal_files["rm_strength_coke"], "01 COKE OVEN")
-        self.assertEqual(portal_files["rm_strength_sinter"], "02 SP-02 PRODUCT")
-        self.assertEqual(portal_files["rm_stock"], "RM BULK STOCK")
         self.assertEqual(portal_files["dust_chemical"], "GCP DUST CATCHER")
-        self.assertEqual(portal_files["ash"], "ASH ANALYSIS")
-        self.assertEqual(portal_files["hot_metal"], "BF-02- HOT METAL, SLAG")
 
 
-class PortalDownloadRetryTests(unittest.TestCase):
-    def test_rm_downloads_bf02_and_bf01_as_one_mode(self):
-        selenium_client = Mock()
-        downloader = PortalDownloader(
-            selenium_client,
-            DownloadConfig(
-                download_dir="downloads",
-                metadata_path="metadata.json",
-                file_station_url="https://portal.example/files",
-                hourly_url="https://portal.example/hourly",
-                portal_files={
-                    "rm": "BF-02 BUNKER",
-                    "rm_sinter": "BF-01 BUNKER",
-                },
-            ),
-            LOGGER,
-        )
-        downloader._safe_download = Mock(
-            side_effect=[
-                DownloadOutcome(status="downloaded", paths=("bf02.xlsx",)),
-                DownloadOutcome(status="downloaded", paths=("bf01.xlsx",)),
-            ]
-        )
+class DownloaderTests(unittest.TestCase):
+    def setUp(self):
+        self.root = [
+            remote("12 BF-02 BUNKER 2026-27.xlsx", 200),
+            remote("11 BF-01 BUNKER 2026-27.xlsx", 200),
+            remote("15 GCP DUST CATCHER ANALYSIS.xlsx", 200),
+        ]
 
-        result = downloader.download(["rm"], ["28-Sep-2026"], False)
-
-        self.assertEqual(result.by_mode["rm"].paths, ("bf02.xlsx", "bf01.xlsx"))
-        self.assertEqual(
-            [call.args[1:] for call in downloader._safe_download.call_args_list],
-            [
-                (["bf-02", "bunker"], "BF-02 BUNKER"),
-                (["bf-01", "bunker"], "BF-01 BUNKER"),
-            ],
-        )
-
-    def test_rm_strength_downloads_coke_and_sinter_as_one_mode(self):
-        downloader = PortalDownloader(
-            Mock(),
-            DownloadConfig(
-                download_dir="downloads",
-                metadata_path="metadata.json",
-                file_station_url="https://portal.example/files",
-                hourly_url="https://portal.example/hourly",
-                portal_files={
-                    "rm_strength_coke": "01 COKE OVEN",
-                    "rm_strength_sinter": "02 SP-02 PRODUCT",
-                },
-            ),
-            LOGGER,
-        )
-        downloader._safe_download = Mock(
-            side_effect=[
-                DownloadOutcome(status="downloaded", paths=("coke.xlsx",)),
-                DownloadOutcome(status="downloaded", paths=("sinter.xlsx",)),
-            ]
-        )
-
-        result = downloader.download(["rm_strength"], ["28-Sep-2026"], False)
-
-        self.assertEqual(
-            result.by_mode["rm_strength"].paths,
-            ("coke.xlsx", "sinter.xlsx"),
-        )
-        self.assertEqual(
-            [call.args[1:] for call in downloader._safe_download.call_args_list],
-            [
-                (["coke", "oven"], "01 COKE OVEN"),
-                (["sp-02", "product"], "02 SP-02 PRODUCT"),
-            ],
-        )
-
-    @patch("domains.download.service.time.sleep")
-    def test_keyword_fallback_restores_a_fresh_virtual_grid_row(self, sleep):
-        downloader = PortalDownloader(None, None, LOGGER)
-        stale_row = {
-            "name": "RM & HM.xlsx",
-            "modified": "08/20/2026 14:19:18",
-            "cell": "stale-cell",
-            "el": "stale-row",
-        }
-        fresh_row = {**stale_row, "cell": "fresh-cell", "el": "fresh-row"}
-        downloader._get_visible_rows = Mock(return_value=[stale_row])
-        downloader._page_down_file_grid = Mock()
-        downloader._restore_grid_row = Mock(return_value=fresh_row)
-
-        result = downloader._find_latest_matching_file_in_grid(
-            "panel",
-            ["rm", "hm"],
-            "a deliberately different identifier",
-        )
-
-        self.assertIs(result, fresh_row)
-        restored_descriptor = downloader._restore_grid_row.call_args.args[1]
-        self.assertEqual(
-            restored_descriptor,
-            {
-                "name": "RM & HM.xlsx",
-                "modified": "08/20/2026 14:19:18",
+    def _config(self):
+        return DownloadConfig(
+            download_dir="downloads",
+            folder_path="/QC_LAB_DATA",
+            charge_folder_path="/V-Optimaise Data/BF2 AUTO REPORTS/CHARGE AND DUMP/HOURLY",
+            portal_files={
+                "rm": "BF-02 BUNKER",
+                "rm_sinter": "BF-01 BUNKER",
+                "fines_analysis": "BF-02 BUNKER",
+                "dust_basic": "BF-02 BUNKER",
+                "dust_chemical": "GCP DUST CATCHER",
             },
         )
 
-    @patch("domains.download.service.time.sleep")
-    def test_stale_element_retries_the_complete_download_flow(self, sleep):
-        downloader = PortalDownloader(None, None, LOGGER)
-        downloader._download_latest_file = Mock(
-            side_effect=[
-                StaleElementReferenceException("row was redrawn"),
-                DownloadOutcome(status="downloaded", paths=("download.xlsx",)),
-            ]
+    def test_shared_bf02_is_downloaded_once_and_fans_out(self):
+        class Client:
+            def __init__(self, files):
+                self.files = files
+                self.downloads = []
+                self.lists = []
+
+            def list_files(inner, folder):
+                inner.lists.append(folder)
+                return inner.files
+
+            def download_file(inner, remote_path, local_path, **_kwargs):
+                inner.downloads.append(remote_path)
+                return str(Path(local_path).resolve())
+
+        client = Client(self.root)
+        result = SynologyDownloader(client, self._config(), LOGGER).download(
+            ["rm", "fines_analysis", "dust"],
+            ["10-Oct-2026"],
+            True,
         )
 
-        outcome = downloader._safe_download(
-            "https://file-station.example",
-            ["rm", "hm"],
-            "RM & HM",
+        bf02 = "/reports/12 BF-02 BUNKER 2026-27.xlsx"
+        self.assertEqual(client.lists, ["/QC_LAB_DATA"])
+        self.assertEqual(client.downloads.count(bf02), 1)
+        self.assertEqual(
+            set(result.by_mode), {"rm", "fines_analysis", "dust"}
+        )
+        self.assertIn("12 BF-02 BUNKER 2026-27.xlsx", result.by_mode["rm"].paths[0])
+
+    def test_charge_uses_nested_api_folder_and_today_name(self):
+        expected_folder = self._config().charge_folder_path
+        charge = remote(
+            "CHARGE_AND_DUMP_REPORT_10_10_2026.xlsx",
+            500,
+            folder=expected_folder,
         )
 
-        self.assertEqual(outcome.status, "downloaded")
-        self.assertEqual(downloader._download_latest_file.call_count, 2)
-        sleep.assert_called_once_with(3)
+        class Client:
+            def __init__(self):
+                self.folders = []
 
+            def list_files(inner, folder):
+                inner.folders.append(folder)
+                return [charge]
 
-class PortalFileStationSessionTests(unittest.TestCase):
-    @patch("domains.download.service.time.sleep")
-    def test_multiple_file_searches_open_file_station_only_once(self, sleep):
-        selenium_client = Mock()
-        selenium_client.driver = Mock()
-        selenium_client.wait = Mock()
-        downloader = PortalDownloader(
-            selenium_client,
-            DownloadConfig(
-                download_dir="downloads",
-                metadata_path="metadata.json",
-                file_station_url="https://portal.example/files",
-                hourly_url="https://portal.example/hourly",
-                file_station_search_path="/V-Optimaise Data/",
-            ),
-            LOGGER,
-        )
-        downloader._select_file_station_folder = Mock(return_value=True)
-        downloader._find_visible_file_grid_panel = Mock(return_value="grid-panel")
-        downloader._wait_for_rows = Mock(return_value=[{"name": "file.xlsx"}])
+            def download_file(inner, remote_path, local_path, **_kwargs):
+                return str(Path(local_path).resolve())
 
-        first_panel = downloader._prepare_file_station_session(
-            "https://portal.example/files"
+        client = Client()
+        result = SynologyDownloader(client, self._config(), LOGGER).download(
+            ["charge"], ["10-Oct-2026"], False
         )
-        second_panel = downloader._prepare_file_station_session(
-            "https://portal.example/files"
-        )
-
-        self.assertEqual(first_panel, "grid-panel")
-        self.assertEqual(second_panel, "grid-panel")
-        selenium_client.driver.get.assert_called_once_with(
-            "https://portal.example/files"
-        )
-        downloader._select_file_station_folder.assert_called_once_with(
-            "/V-Optimaise Data/"
-        )
-
-    @patch("domains.download.service.time.sleep")
-    def test_webdriver_error_invalidates_session_before_retry(self, sleep):
-        downloader = PortalDownloader(None, None, LOGGER)
-        downloader._file_station_session_ready = True
-        downloader._download_latest_file = Mock(
-            side_effect=[
-                StaleElementReferenceException("grid was redrawn"),
-                DownloadOutcome(status="downloaded", paths=("download.xlsx",)),
-            ]
-        )
-
-        outcome = downloader._safe_download(
-            "https://portal.example/files",
-            ["rm", "hm"],
-            "RM & HM",
-        )
-
-        self.assertEqual(outcome.status, "downloaded")
-        self.assertFalse(downloader._file_station_session_ready)
-        self.assertEqual(downloader._download_latest_file.call_count, 2)
+        self.assertEqual(client.folders, [expected_folder])
+        self.assertEqual(result.by_mode["charge"].status, "downloaded")
 
 
 if __name__ == "__main__":

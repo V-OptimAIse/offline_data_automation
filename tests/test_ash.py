@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
-import tempfile
 import unittest
+from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -19,7 +20,8 @@ from app import _ash_source_files
 from domains.ash.reader import AshReader
 from domains.ash.service import AshService
 from domains.ash.transformer import AshTransformer
-from domains.download.service import PortalDownloader, format_portal_filename
+from domains.download.service import format_portal_filename, latest_matching_file
+from infrastructure.synology_api_client import RemoteFile
 from infrastructure.database_targets import DatabaseTarget
 
 
@@ -57,10 +59,14 @@ class AshReaderTransformerTests(unittest.TestCase):
             values=self._values("31.07.26", include_alkali_oxides=True),
         )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workbook_path = Path(temp_dir) / "ASH ANALYSIS 26-27.xlsx"
+        temp_dir = Path(__file__).resolve().parent / ".ash-reader-test-data"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir()
+        with nullcontext(temp_dir):
+            workbook_path = temp_dir / "ASH ANALYSIS 26-27.xlsx"
             workbook.save(workbook_path)
             raw = AshReader(LOGGER).read(str(workbook_path), ASH_CONFIG)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         result = AshTransformer(LOGGER).transform(
             raw,
@@ -190,29 +196,25 @@ class AshDownloadTests(unittest.TestCase):
         self.assertEqual(format_portal_filename(template, "01-Apr-2027"), "ASH ANALYSIS 27-28")
 
     def test_expected_financial_year_is_preferred_over_newer_generic_match(self):
-        reader = PortalDownloader(None, None, LOGGER)
         rows = [
-            {
-                "name": "ASH ANALYSIS 27-28.xlsx",
-                "modified": "08/25/2027 12:00:00",
-            },
-            {
-                "name": "ASH ANALYSIS 26-27.xlsx",
-                "modified": "08/25/2026 12:00:00",
-            },
+            RemoteFile("ASH ANALYSIS 27-28.xlsx", "/ASH ANALYSIS 27-28.xlsx", 1, 2, False),
+            RemoteFile("ASH ANALYSIS 26-27.xlsx", "/ASH ANALYSIS 26-27.xlsx", 1, 1, False),
         ]
 
-        match = reader._find_latest_matching_file(
+        match = latest_matching_file(
             rows,
-            ["ash", "analysis"],
-            "ASH ANALYSIS 26-27",
+            "ASH ANALYSIS",
+            expected_name="ASH ANALYSIS 26-27",
         )
 
-        self.assertEqual(match["name"], "ASH ANALYSIS 26-27.xlsx")
+        self.assertEqual(match.name, "ASH ANALYSIS 26-27.xlsx")
 
     def test_skip_download_ignores_excel_lock_file(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            download_dir = Path(temp_dir)
+        temp_dir = Path(__file__).resolve().parent / ".ash-download-test-data"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir()
+        with nullcontext(temp_dir):
+            download_dir = temp_dir
             source = download_dir / "ASH ANALYSIS 26-27.xlsx"
             lock_file = download_dir / "~$ASH ANALYSIS 26-27.xlsx"
             source.touch()
@@ -226,6 +228,7 @@ class AshDownloadTests(unittest.TestCase):
                 filename_template="ASH ANALYSIS {financial_year_short}",
                 logger=LOGGER,
             )
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         self.assertEqual(matches, [source])
 
