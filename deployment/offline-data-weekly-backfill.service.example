@@ -1,0 +1,24 @@
+[Unit]
+Description=Offline Data Automation - Weekly All-Mode Backfill
+Wants=network-online.target
+After=network-online.target
+OnFailure=offline-data-automation-failure@%n.service
+
+[Service]
+Type=oneshot
+User=voptimaise
+WorkingDirectory=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation
+EnvironmentFile=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Kolkata
+
+ExecStartPre=/usr/bin/mkdir -p /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs
+ExecStart=/usr/bin/flock --wait 21600 /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.scheduled-jobs.lock /bin/bash -c 'END_ISO=$$(/usr/bin/date --date="last Saturday" +%%F); START_DATE=$$(/usr/bin/date --date="$$END_ISO - 6 days" +%%d-%%m-%%Y); END_DATE=$$(/usr/bin/date --date="$$END_ISO" +%%d-%%m-%%Y); echo "Running all modes from $$START_DATE to $$END_DATE"; exec /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.venv/bin/python /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/src/app.py --mode rm,fines_analysis,dpr,hot_metal,rm_strength,rm_stock,charge,dust,ash --rundate "$$START_DATE to $$END_DATE"'
+
+TimeoutStartSec=12h
+KillMode=control-group
+TimeoutStopSec=30m
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=append:/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs/offline-data-error.log

@@ -5,6 +5,7 @@ output/
 outputs/
 
 downloaded_metadata.json
+.scheduled-jobs.lock
 __pycache__/
 *.pyc
 

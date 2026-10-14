@@ -1,0 +1,24 @@
+[Unit]
+Description=Offline Data Automation - Daily Yesterday Charge
+Wants=network-online.target
+After=network-online.target
+OnFailure=offline-data-automation-failure@%n.service
+
+[Service]
+Type=oneshot
+User=voptimaise
+WorkingDirectory=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation
+EnvironmentFile=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Kolkata
+
+ExecStartPre=/usr/bin/mkdir -p /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs
+ExecStart=/usr/bin/flock --wait 21600 /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.scheduled-jobs.lock /bin/bash -c 'RUN_DATE=$$(/usr/bin/date --date="yesterday" +%%d-%%m-%%Y); echo "Running charge for $$RUN_DATE"; exec /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.venv/bin/python /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/src/app.py --mode charge --rundate "$$RUN_DATE"'
+
+TimeoutStartSec=8h
+KillMode=control-group
+TimeoutStopSec=30m
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=append:/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs/offline-data-error.log

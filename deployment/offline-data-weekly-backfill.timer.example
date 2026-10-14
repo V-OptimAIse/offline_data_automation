@@ -1,0 +1,11 @@
+[Unit]
+Description=Run all-mode seven-day backfill every Sunday at 00:30 IST
+
+[Timer]
+OnCalendar=Sun *-*-* 00:30:00 Asia/Kolkata
+Persistent=true
+AccuracySec=1min
+Unit=offline-data-weekly-backfill.service
+
+[Install]
+WantedBy=timers.target

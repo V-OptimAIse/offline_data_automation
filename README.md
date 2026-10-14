@@ -126,7 +126,7 @@ Look for `Change detected`, `Source stable`, `Downloading`, `Triggered modes`, `
 
 ## systemd deployment
 
-Copy `deployment/offline-data-synology-monitor.service.example` to `/etc/systemd/system/offline-data-synology-monitor.service`. Edit `User`, `WorkingDirectory`, and `ExecStart` to match the Raspberry Pi installation, then run:
+Copy `deployment/offline-data-synology-monitor.service.example` to `/etc/systemd/system/offline-data-synology-monitor.service`. The template uses `/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation`, then run:
 
 ```bash
 sudo systemctl daemon-reload
@@ -136,6 +136,45 @@ journalctl -u offline-data-synology-monitor.service -f
 ```
 
 Validate the new watcher and database results before disabling the old hourly application timers.
+
+### Scheduled daily charge and weekly backfill
+
+The deployment directory also contains two scheduled jobs. Each job needs both its `.service` and `.timer` unit:
+
+- `offline-data-charge-daily`: runs every day at 00:10 Asia/Kolkata and processes charge for yesterday.
+- `offline-data-weekly-backfill`: runs every Sunday at 00:30 Asia/Kolkata and processes all modes for the previous seven completed days, Sunday through Saturday.
+
+The weekly job starts 20 minutes after the daily job. Both services use the same `flock` file, so the weekly job waits if the daily job is still running. They download current source files through the Synology API and then perform the requested database writes.
+
+Install and enable the units on the Raspberry Pi:
+
+```bash
+cd /home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation
+
+sudo install -m 0644 deployment/offline-data-charge-daily.service.example /etc/systemd/system/offline-data-charge-daily.service
+sudo install -m 0644 deployment/offline-data-charge-daily.timer.example /etc/systemd/system/offline-data-charge-daily.timer
+sudo install -m 0644 deployment/offline-data-weekly-backfill.service.example /etc/systemd/system/offline-data-weekly-backfill.service
+sudo install -m 0644 deployment/offline-data-weekly-backfill.timer.example /etc/systemd/system/offline-data-weekly-backfill.timer
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now offline-data-charge-daily.timer
+sudo systemctl enable --now offline-data-weekly-backfill.timer
+systemctl list-timers --all | grep offline-data
+```
+
+Test each service without waiting for its timer:
+
+```bash
+sudo systemctl start offline-data-charge-daily.service
+sudo systemctl status offline-data-charge-daily.service
+sudo journalctl -u offline-data-charge-daily.service -n 100 --no-pager
+
+sudo systemctl start offline-data-weekly-backfill.service
+sudo systemctl status offline-data-weekly-backfill.service
+sudo journalctl -u offline-data-weekly-backfill.service -n 100 --no-pager
+```
+
+The `OnFailure` entries use the existing `offline-data-automation-failure@.service` mail handler. Both scheduled services append uncaught errors to `/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs/offline-data-error.log`, so update the old mail handler to tail that path. If the failure handler is not installed, remove the `OnFailure` lines.
 
 ## Supported modes
 

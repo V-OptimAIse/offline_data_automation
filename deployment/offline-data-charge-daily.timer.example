@@ -1,0 +1,11 @@
+[Unit]
+Description=Run yesterday's charge processing every day at 00:10 IST
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 Asia/Kolkata
+Persistent=true
+AccuracySec=1min
+Unit=offline-data-charge-daily.service
+
+[Install]
+WantedBy=timers.target

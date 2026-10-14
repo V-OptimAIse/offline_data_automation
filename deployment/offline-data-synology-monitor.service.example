@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=voptimaise
-WorkingDirectory=/path/to/offline_data_automation
-ExecStart=/path/to/offline_data_automation/.venv/bin/python src/monitor.py
+WorkingDirectory=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation
+ExecStart=/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/.venv/bin/python src/monitor.py
 Restart=always
 RestartSec=10
 
