@@ -45,7 +45,11 @@ def _profile_folder(cfg: dict, profile: str) -> str:
     return str(value).rstrip("/") or "/"
 
 
-def build_source_registry(cfg: dict, run_date: date) -> tuple[SourceSpec, ...]:
+def build_source_registry(
+    cfg: dict,
+    run_date: date,
+    processing_dates: Iterable[date] | None = None,
+) -> tuple[SourceSpec, ...]:
     portal_files = cfg.get("portal_files") or {}
     profile_1_folder = _profile_folder(cfg, "profile_1")
     profile_2_folder = _profile_folder(cfg, "profile_2")
@@ -56,6 +60,37 @@ def build_source_registry(cfg: dict, run_date: date) -> tuple[SourceSpec, ...]:
     ash_identifier = identifier("ash", "ASH ANALYSIS")
     formatted_run_date = run_date.strftime("%d-%b-%Y")
     charge_name = charge_expected_name(formatted_run_date)
+    effective_dates = tuple(dict.fromkeys(processing_dates or (run_date,)))
+    if run_date not in effective_dates:
+        effective_dates = (*effective_dates, run_date)
+
+    current_ash_name = ash_expected_name(ash_identifier, formatted_run_date)
+    ash_names = tuple(
+        dict.fromkeys(
+            (
+                current_ash_name,
+                *(
+                    ash_expected_name(
+                        ash_identifier,
+                        processing_date.strftime("%d-%b-%Y"),
+                    )
+                    for processing_date in effective_dates
+                ),
+            )
+        )
+    )
+    ash_specs = tuple(
+        SourceSpec(
+            "ash" if expected_name == current_ash_name else f"ash:{expected_name}",
+            "profile_1",
+            profile_1_folder,
+            ash_identifier,
+            ("ash",),
+            expected_name=expected_name,
+        )
+        for expected_name in ash_names
+    )
+
     return (
         SourceSpec(
             "bf02_bunker",
@@ -120,14 +155,7 @@ def build_source_registry(cfg: dict, run_date: date) -> tuple[SourceSpec, ...]:
             identifier("dust_chemical", "GCP DUST CATCHER"),
             ("dust",),
         ),
-        SourceSpec(
-            "ash",
-            "profile_1",
-            profile_1_folder,
-            ash_identifier,
-            ("ash",),
-            expected_name=ash_expected_name(ash_identifier, formatted_run_date),
-        ),
+        *ash_specs,
         SourceSpec(
             f"charge:{run_date.isoformat()}",
             "profile_1",

@@ -18,6 +18,8 @@ It resolves all required files locally from those listings. A source changes whe
 
 Completed revisions are stored atomically in `output/state/synology_monitor_state.json`. State is committed only after processing and database work return successfully, so failed revisions remain retryable. On the first startup, current files are recorded as a baseline without processing unless `--process-initial` is explicitly supplied.
 
+Whenever a changed source triggers a mode, the monitor processes the rolling non-charge window from day before yesterday through today. For example, a run on 14-Oct-2026 processes 12-Oct-2026, 13-Oct-2026, and 14-Oct-2026. Charge is intentionally excluded from that lookback and processes today only. The dates are calculated in the Asia/Kolkata timezone on every cycle.
+
 ## Requirements and installation
 
 - Python 3.12 or newer

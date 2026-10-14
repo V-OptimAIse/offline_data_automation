@@ -153,6 +153,10 @@ class MonitorTests(unittest.TestCase):
     def test_mtime_change_triggers_and_commits(self):
         self._baseline_dpr_then(remote("08 BF-02 DPR.xlsx", 101, 10, P1))
         self.assertEqual(self.processor.call_args.args[0], ["dpr"])
+        self.assertEqual(
+            self.processor.call_args.args[1],
+            ["08-Oct-2026", "09-Oct-2026", "10-Oct-2026"],
+        )
         self.assertEqual(load_monitor_state(self.state_path)["sources"]["dpr"]["mtime"], 101)
 
     def test_size_change_triggers(self):
@@ -237,8 +241,54 @@ class MonitorTests(unittest.TestCase):
         self.p1.folders[CHARGE] = [remote(name, 200, 10, CHARGE)]
         self.monitor.run_cycle()
         self.assertEqual(self.processor.call_args.args[0], ["charge"])
+        self.assertEqual(self.processor.call_args.args[1], ["10-Oct-2026"])
         state = load_monitor_state(self.state_path)
         self.assertEqual(state["sources"]["charge:2026-10-10"]["mtime"], 200)
+
+    def test_charge_and_non_charge_use_separate_date_windows(self):
+        charge_name = "CHARGE_AND_DUMP_REPORT_10_10_2026.xlsx"
+        self.p1.folders[P1] = [remote("08 BF-02 DPR.xlsx", 100, 10, P1)]
+        self.p1.folders[CHARGE] = [remote(charge_name, 100, 10, CHARGE)]
+        self.monitor.run_cycle()
+
+        self.p1.folders[P1] = [remote("08 BF-02 DPR.xlsx", 200, 10, P1)]
+        self.p1.folders[CHARGE] = [remote(charge_name, 200, 10, CHARGE)]
+        self.monitor.run_cycle()
+
+        self.assertEqual(self.processor.call_count, 2)
+        self.assertEqual(self.processor.call_args_list[0].args[0], ["dpr"])
+        self.assertEqual(
+            self.processor.call_args_list[0].args[1],
+            ["08-Oct-2026", "09-Oct-2026", "10-Oct-2026"],
+        )
+        self.assertEqual(self.processor.call_args_list[1].args[0], ["charge"])
+        self.assertEqual(self.processor.call_args_list[1].args[1], ["10-Oct-2026"])
+
+    def test_ash_downloads_both_financial_year_files_when_window_crosses_april(self):
+        boundary_now = datetime(2026, 4, 1, 12, 0, tzinfo=TZ)
+        self.p1.folders[P1] = [
+            remote("20 ASH ANALYSIS 25-26.xlsx", 100, 10, P1),
+            remote("21 ASH ANALYSIS 26-27.xlsx", 100, 10, P1),
+        ]
+        boundary_monitor = SynologyMonitor(
+            self.cfg,
+            {"profile_1": self.p1, "profile_2": self.p2},
+            LOGGER,
+            process_initial=True,
+            sleep=lambda _seconds: None,
+            processor=self.processor,
+            now=lambda: boundary_now,
+        )
+
+        boundary_monitor.run_cycle()
+
+        self.assertEqual(self.processor.call_args.args[0], ["ash"])
+        self.assertEqual(
+            self.processor.call_args.args[1],
+            ["30-Mar-2026", "31-Mar-2026", "01-Apr-2026"],
+        )
+        ash_paths = self.processor.call_args.args[4].by_mode["ash"].paths
+        self.assertEqual(len(ash_paths), 2)
 
     def test_dry_run_does_not_download_process_or_commit(self):
         self.p1.folders[P1] = [remote("08 BF-02 DPR.xlsx", folder=P1)]

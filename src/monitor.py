@@ -7,7 +7,7 @@ import signal
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -39,6 +39,11 @@ MODE_ORDER = (
     "dust",
     "ash",
 )
+
+
+def rolling_processing_dates(run_date: date) -> tuple[date, date, date]:
+    """Return day-before-yesterday, yesterday, and today in chronological order."""
+    return tuple(run_date - timedelta(days=offset) for offset in (2, 1, 0))
 
 
 def load_monitor_state(path: Path) -> dict:
@@ -267,7 +272,14 @@ class SynologyMonitor:
 
     def run_cycle(self) -> bool:
         cycle_now = self.now().astimezone(BUSINESS_TZ)
-        specs = build_source_registry(self.cfg, cycle_now.date())
+        processing_dates = rolling_processing_dates(cycle_now.date())
+        run_dates = [value.strftime("%d-%b-%Y") for value in processing_dates]
+        today_run_date = run_dates[-1]
+        specs = build_source_registry(
+            self.cfg,
+            cycle_now.date(),
+            processing_dates=processing_dates,
+        )
         state_existed = self.state_path.exists()
         state = load_monitor_state(self.state_path)
         listings = self._list(listing_keys(specs))
@@ -336,15 +348,32 @@ class SynologyMonitor:
             modes,
             state,
         )
-        run_date = cycle_now.strftime("%d-%b-%Y")
-        self.processor(
-            modes,
-            [run_date],
-            self.cfg,
-            self.logger,
-            result,
-            skip_download=False,
-        )
+        non_charge_modes = [mode for mode in modes if mode != "charge"]
+        if non_charge_modes:
+            self.logger.info(
+                "Processing non-charge window | start=%s | end=%s | days=%d",
+                run_dates[0],
+                run_dates[-1],
+                len(run_dates),
+            )
+            self.processor(
+                non_charge_modes,
+                run_dates,
+                self.cfg,
+                self.logger,
+                result,
+                skip_download=False,
+            )
+        if "charge" in modes:
+            self.logger.info("Processing charge for today | date=%s", today_run_date)
+            self.processor(
+                ["charge"],
+                [today_run_date],
+                self.cfg,
+                self.logger,
+                result,
+                skip_download=False,
+            )
         self.logger.info("Processing completed | sources=%s", ",".join(stable))
 
         for source_id, source in stable.items():
