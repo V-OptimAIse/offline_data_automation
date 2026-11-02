@@ -65,7 +65,8 @@ class RMService:
                 if prefix == bf2_prefix
             )
             source_modified_at["BF2"] = self._file_modified_at(rm_file)
-        if sinter_file:
+        read_sinter_bf1 = rm_cfg.get("read_sinter_bf1", True)
+        if sinter_file and read_sinter_bf1:
             bf1_frames = self.reader.read(
                 sinter_file,
                 rm_cfg["sinter_sheet_config"],
@@ -75,6 +76,11 @@ class RMService:
                 frame.copy() for frame, _, _ in bf1_frames
             )
             source_modified_at["BF1"] = self._file_modified_at(sinter_file)
+        elif sinter_file:
+            self.logger.info(
+                "RM Sinter BF1 reading is disabled by rm.read_sinter_bf1; "
+                "skipping the BF1 source file"
+            )
 
         sinter_processor = RMSinterProcessor(
             logger=self.logger,

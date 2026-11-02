@@ -39,14 +39,15 @@ class RMStockService:
         # Load mapping ONCE
         self.material_map = self._load_materials()
         self.db_material_map = self._load_db_materials()
+        self.material_keyword_rules = self._load_material_keyword_rules()
 
     @staticmethod
     def _normalize_material_name(value) -> str:
         if value is None:
             return ""
 
-        text = re.sub(r"\s+", " ", str(value)).strip().lower()
-        text = re.sub(r"\s*-\s*(?=\()", " ", text)
+        text = str(value).casefold()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
         return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
@@ -80,7 +81,7 @@ class RMStockService:
         material_data = {
             key: value
             for key, value in data.items()
-            if key != "db_material_map"
+            if key not in {"db_material_map", "material_keyword_rules"}
         }
         return self._normalize_mapping(material_data)
 
@@ -95,14 +96,70 @@ class RMStockService:
 
         return self._normalize_mapping(db_map)
 
+    def _load_material_keyword_rules(self):
+        data = self._load_mapping_file()
+        raw_rules = data.get("material_keyword_rules") or []
+        if not isinstance(raw_rules, list):
+            raise ValueError("rm_stock.yaml material_keyword_rules must be a list")
+
+        rules = []
+        for raw_rule in raw_rules:
+            if not isinstance(raw_rule, dict):
+                continue
+
+            raw_keywords = raw_rule.get("keywords") or []
+            if not isinstance(raw_keywords, list):
+                continue
+
+            keywords = tuple(
+                normalized
+                for keyword in raw_keywords
+                if (normalized := self._normalize_material_name(keyword))
+            )
+            material_key = str(raw_rule.get("material_key") or "").strip()
+            db_material_code = str(raw_rule.get("db_material_code") or "").strip()
+            if keywords and material_key:
+                rules.append(
+                    {
+                        "keywords": keywords,
+                        "material_key": material_key,
+                        "db_material_code": db_material_code or None,
+                    }
+                )
+
+        return rules
+
+    def _match_material_keyword_rule(self, material: str):
+        normalized_material = self._normalize_material_name(material)
+        searchable_material = f" {normalized_material} "
+        for rule in self.material_keyword_rules:
+            if all(
+                f" {keyword} " in searchable_material
+                for keyword in rule["keywords"]
+            ):
+                return rule
+        return None
+
     # -------------------------------------------------
     # MAP RAW MATERIAL -> SHORT KEY
     # -------------------------------------------------
     def _map_material(self, material: str):
-        return self.material_map.get(self._normalize_material_name(material))
+        normalized_material = self._normalize_material_name(material)
+        exact_match = self.material_map.get(normalized_material)
+        if exact_match:
+            return exact_match
+
+        keyword_rule = self._match_material_keyword_rule(material)
+        return keyword_rule["material_key"] if keyword_rule else None
 
     def _map_db_material(self, material: str):
-        return self.db_material_map.get(self._normalize_material_name(material))
+        normalized_material = self._normalize_material_name(material)
+        exact_match = self.db_material_map.get(normalized_material)
+        if exact_match:
+            return exact_match
+
+        keyword_rule = self._match_material_keyword_rule(material)
+        return keyword_rule["db_material_code"] if keyword_rule else None
 
     @staticmethod
     def _material_code_candidates(material_key):

@@ -23,6 +23,32 @@ RM_CONFIG = load_yaml("src/config/rm.yaml")["rm"]
 
 
 class RMSinterReaderTests(unittest.TestCase):
+    def test_bf01_source_is_not_read_when_disabled(self):
+        service = RMService(LOGGER)
+        service.reader = Mock()
+        config = {
+            "rm": {
+                "output": {"dir": "tests/.rm-bf1-disabled-test"},
+                "run_date_format": "%d-%b-%Y",
+                "read_sinter_bf1": False,
+                "invalid_markers": [],
+            }
+        }
+
+        with self.assertLogs("test_rm", level="INFO") as captured:
+            result = service.process(
+                rm_file=None,
+                setting_cfg=config,
+                run_dates=["23-Oct-2026"],
+                sinter_file="11 BF-01 BUNKER.xlsx",
+            )
+
+        self.assertTrue(result.empty)
+        service.reader.read.assert_not_called()
+        self.assertTrue(
+            any("BF1 reading is disabled" in message for message in captured.output)
+        )
+
     @patch("domains.rm.reader.pd.read_excel")
     @patch("domains.rm.reader.pd.ExcelFile")
     def test_bf01_reader_reads_only_the_configured_chemistry_sheet(

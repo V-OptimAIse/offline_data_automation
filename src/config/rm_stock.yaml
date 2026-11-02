@@ -139,6 +139,17 @@ Quartzite: quartzite_mt
 # "G-3 TOTAL": g3_total_mt
 Sinter Stock at Yard: g3_total_mt
 
+# ---------------- NORMALIZED KEYWORD FALLBACKS ----------------
+# Exact material-name mappings above take priority. These rules handle source
+# labels whose punctuation or descriptive suffixes change between reports.
+material_keyword_rules:
+  - keywords:
+      - NMDC Limited ROM
+      - ROM
+      - Kirandul
+    material_key: nmdc_rom_mt
+    db_material_code: ore_5
+
 # ---------------- NEON/PI MATERIAL CODE MAPPING ----------------
 db_material_map:
   # ---------------- IRON ORE PELLETS ----------------

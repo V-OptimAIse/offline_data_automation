@@ -12,6 +12,9 @@ rm:
 
   invalid_markers: [STOP, "N/A", NA, n/a, na, "-", ""]
 
+  # Temporary: skip BF1 Sinter ingestion while its timestamps are being fixed.
+  read_sinter_bf1: false
+
   neon:
     schema: offline_feed
     upsert_mode: update_insert
