@@ -5,6 +5,12 @@ from collections import defaultdict
 from typing import Iterator
 
 
+DEDICATED_SINTER_CATEGORIES = {
+    "sinter sp 01 online",
+    "sinter sp 02 online",
+}
+
+
 class RMNeonMapper:
     def __init__(
         self,
@@ -48,6 +54,8 @@ class RMNeonMapper:
             if not parsed:
                 continue
             pattern, prop = parsed
+            if pattern in DEDICATED_SINTER_CATEGORIES:
+                continue
             m = self.category_map[pattern]
             material_code = self._material_code(m)
             if not material_code:

@@ -23,14 +23,13 @@ RM_CONFIG = load_yaml("src/config/rm.yaml")["rm"]
 
 
 class RMSinterReaderTests(unittest.TestCase):
-    def test_bf01_source_is_not_read_when_disabled(self):
+    def test_bf01_source_is_not_read_by_default(self):
         service = RMService(LOGGER)
         service.reader = Mock()
         config = {
             "rm": {
                 "output": {"dir": "tests/.rm-bf1-disabled-test"},
                 "run_date_format": "%d-%b-%Y",
-                "read_sinter_bf1": False,
                 "invalid_markers": [],
             }
         }
@@ -48,6 +47,9 @@ class RMSinterReaderTests(unittest.TestCase):
         self.assertTrue(
             any("BF1 reading is disabled" in message for message in captured.output)
         )
+
+    def test_project_configuration_is_bf2_only(self):
+        self.assertFalse(RM_CONFIG["read_sinter_bf1"])
 
     @patch("domains.rm.reader.pd.read_excel")
     @patch("domains.rm.reader.pd.ExcelFile")

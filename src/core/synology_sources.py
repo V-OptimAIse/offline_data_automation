@@ -100,13 +100,6 @@ def build_source_registry(
             ("rm", "fines_analysis", "dust"),
         ),
         SourceSpec(
-            "bf01_bunker",
-            "profile_2",
-            profile_2_folder,
-            identifier("rm_sinter", "BF-01 BUNKER"),
-            ("rm",),
-        ),
-        SourceSpec(
             "dpr",
             "profile_1",
             profile_1_folder,

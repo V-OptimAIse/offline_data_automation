@@ -86,7 +86,6 @@ def config(root: Path):
         },
         "portal_files": {
             "rm": "BF-02 BUNKER",
-            "rm_sinter": "BF-01 BUNKER",
             "fines_analysis": "BF-02 BUNKER",
             "dpr": "BF-02 DPR",
             "hot_metal": "BF-02- HOT METAL, SLAG",
@@ -220,12 +219,12 @@ class MonitorTests(unittest.TestCase):
         bf02_path = f"{P2}/12 BF-02 BUNKER 2026-27.xlsx"
         self.assertEqual(self.p2.download_calls.count(bf02_path), 1)
 
-    def test_bf01_triggers_rm_only(self):
+    def test_bf01_does_not_trigger_rm(self):
         self.p2.folders[P2] = self._profile2_dependencies()
         self.monitor.run_cycle()
         self.p2.folders[P2] = self._profile2_dependencies(bf01_mtime=200)
         self.monitor.run_cycle()
-        self.assertEqual(self.processor.call_args.args[0], ["rm"])
+        self.processor.assert_not_called()
 
     def test_gcp_dust_catcher_triggers_dust_only(self):
         self.p2.folders[P2] = self._profile2_dependencies()

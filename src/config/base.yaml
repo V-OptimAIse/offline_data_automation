@@ -43,7 +43,6 @@ monitor:
 # (financial year, month, revision, and extension) may change freely.
 portal_files:
   rm: "BF-02 BUNKER"
-  rm_sinter: "BF-01 BUNKER"
   fines_analysis: "BF-02 BUNKER"
   dpr: "BF-02 DPR"
   hot_metal: "BF-02- HOT METAL, SLAG"

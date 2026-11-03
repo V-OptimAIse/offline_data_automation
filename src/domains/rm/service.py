@@ -65,7 +65,8 @@ class RMService:
                 if prefix == bf2_prefix
             )
             source_modified_at["BF2"] = self._file_modified_at(rm_file)
-        read_sinter_bf1 = rm_cfg.get("read_sinter_bf1", True)
+        # BF1 is opt-in so an absent setting cannot accidentally re-enable it.
+        read_sinter_bf1 = rm_cfg.get("read_sinter_bf1", False)
         if sinter_file and read_sinter_bf1:
             bf1_frames = self.reader.read(
                 sinter_file,

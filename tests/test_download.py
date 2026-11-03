@@ -87,7 +87,7 @@ class FilenameMatchingTests(unittest.TestCase):
     def test_base_config_keeps_stable_identifiers(self):
         portal_files = load_yaml("src/config/base.yaml")["portal_files"]
         self.assertEqual(portal_files["rm"], "BF-02 BUNKER")
-        self.assertEqual(portal_files["rm_sinter"], "BF-01 BUNKER")
+        self.assertNotIn("rm_sinter", portal_files)
         self.assertEqual(portal_files["dust_chemical"], "GCP DUST CATCHER")
 
 
@@ -106,7 +106,6 @@ class DownloaderTests(unittest.TestCase):
             charge_folder_path="/V-Optimaise Data/BF2 AUTO REPORTS/CHARGE AND DUMP/HOURLY",
             portal_files={
                 "rm": "BF-02 BUNKER",
-                "rm_sinter": "BF-01 BUNKER",
                 "fines_analysis": "BF-02 BUNKER",
                 "dust_basic": "BF-02 BUNKER",
                 "dust_chemical": "GCP DUST CATCHER",
@@ -136,8 +135,10 @@ class DownloaderTests(unittest.TestCase):
         )
 
         bf02 = "/reports/12 BF-02 BUNKER 2026-27.xlsx"
+        bf01 = "/reports/11 BF-01 BUNKER 2026-27.xlsx"
         self.assertEqual(client.lists, ["/QC_LAB_DATA"])
         self.assertEqual(client.downloads.count(bf02), 1)
+        self.assertNotIn(bf01, client.downloads)
         self.assertEqual(
             set(result.by_mode), {"rm", "fines_analysis", "dust"}
         )

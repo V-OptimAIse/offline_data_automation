@@ -1,4 +1,7 @@
 rm:
+  # BF1 Sinter ingestion is paused; RM reads and stores BF2 data only.
+  read_sinter_bf1: false
+
   output:
     dir: output/rm
     filename: rm_processed_data.xlsx
