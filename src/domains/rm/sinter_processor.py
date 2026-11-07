@@ -19,6 +19,7 @@ import pandas as pd
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 MATERIAL_CODE = "sinter_3"
+ACTIVE_SOURCE = "BF2"
 STATE_VERSION = 1
 
 CHEMISTRY_FIELDS = (
@@ -91,7 +92,7 @@ class SinterBatch:
 
 
 class RMSinterProcessor:
-    """Build restart-safe BF1/BF2 online Sinter events for Neon."""
+    """Build one restart-safe BF2 online Sinter event per production shift."""
 
     def __init__(
         self,
@@ -111,25 +112,36 @@ class RMSinterProcessor:
     ) -> SinterBatch:
         state = self._load_state()
         shifts = state.setdefault("shifts", {})
+        removed_sources = 0
+        for shift_state in shifts.values():
+            if not isinstance(shift_state, dict):
+                continue
+            for source in tuple(shift_state):
+                if source != ACTIVE_SOURCE:
+                    del shift_state[source]
+                    removed_sources += 1
+        if removed_sources:
+            self.logger.info(
+                f"RM Sinter ignored {removed_sources} inactive source state record(s); "
+                f"only {ACTIVE_SOURCE} is enabled"
+            )
         source_modified_at = source_modified_at or {}
         detected_at = self._local_naive(self._now())
 
         events: list[SinterEvent] = []
-        for source in ("BF1", "BF2"):
-            frames = source_frames.get(source, [])
-            fallback = source_modified_at.get(source)
-            fallback_source = "source_modified" if fallback is not None else "first_detection"
-            fallback_time = self._local_naive(fallback or detected_at)
-            for frame in frames:
-                events.extend(
-                    self._extract_frame_events(
-                        frame=frame,
-                        source=source,
-                        run_dates=set(run_dates),
-                        fallback_time=fallback_time,
-                        fallback_source=fallback_source,
-                    )
+        fallback = source_modified_at.get(ACTIVE_SOURCE)
+        fallback_source = "source_modified" if fallback is not None else "first_detection"
+        fallback_time = self._local_naive(fallback or detected_at)
+        for frame in source_frames.get(ACTIVE_SOURCE, []):
+            events.extend(
+                self._extract_frame_events(
+                    frame=frame,
+                    source=ACTIVE_SOURCE,
+                    run_dates=set(run_dates),
+                    fallback_time=fallback_time,
+                    fallback_source=fallback_source,
                 )
+            )
 
         events_by_shift: dict[str, list[SinterEvent]] = {}
         for event in events:
@@ -138,53 +150,36 @@ class RMSinterProcessor:
 
         for shift_key, shift_events in events_by_shift.items():
             shift_state = shifts.setdefault(shift_key, {})
-            new_events: list[SinterEvent] = []
+            # A reader can return more than one frame for the same sheet. Keep the
+            # latest BF2 event, but always store it at the production-shift anchor.
+            # The Neon client interprets this naive value as Asia/Kolkata and writes
+            # it as UTC (07:00/15:00/23:00 IST => 01:30/09:30/17:30 UTC).
+            event = max(
+                enumerate(shift_events),
+                key=lambda item: (item[1].event_time, item[0]),
+            )[1]
+            assigned = event.shift_anchor
+            assigned_text = self._format_datetime(assigned)
+            current = shift_state.get(ACTIVE_SOURCE)
 
-            for event in shift_events:
-                current = shift_state.get(event.source)
-                if current is None:
-                    new_events.append(event)
-                    continue
-
-                if current.get("fingerprint") == event.fingerprint:
-                    continue
-
-                current.update(self._state_values(event))
-                current["status"] = "pending"
-                self.logger.info(
-                    f"RM Sinter correction detected: {event.source} shift={shift_key}; "
-                    f"updating assigned row {current['assigned_date_time']}"
-                )
-
-            if not new_events:
+            if (
+                current is not None
+                and current.get("fingerprint") == event.fingerprint
+                and current.get("assigned_date_time") == assigned_text
+            ):
                 continue
 
-            new_events.sort(key=lambda item: (item.event_time, item.source))
-            if (
-                len(new_events) > 1
-                and new_events[0].event_time == new_events[1].event_time
-            ):
-                self.logger.warning(
-                    "RM Sinter event timestamps are tied; using source name only as the "
-                    "deterministic tie-breaker"
-                )
-
-            for event in new_events:
-                if shift_state:
-                    assigned = event.event_time
-                else:
-                    assigned = event.shift_anchor
-
-                shift_state[event.source] = {
-                    **self._state_values(event),
-                    "assigned_date_time": self._format_datetime(assigned),
-                    "status": "pending",
-                }
-                self.logger.info(
-                    f"RM Sinter event accepted: {event.source} shift={shift_key} "
-                    f"assigned={self._format_datetime(assigned)} "
-                    f"timestamp_source={event.event_time_source}"
-                )
+            is_correction = current is not None
+            shift_state[ACTIVE_SOURCE] = {
+                **self._state_values(event),
+                "assigned_date_time": assigned_text,
+                "status": "pending",
+            }
+            action = "correction" if is_correction else "event"
+            self.logger.info(
+                f"RM Sinter {action} accepted: {ACTIVE_SOURCE} shift={shift_key} "
+                f"assigned={assigned_text} timestamp_source={event.event_time_source}"
+            )
 
         requested_shifts = {
             self._format_datetime(self.shift_anchor(run_date, shift))
@@ -194,11 +189,11 @@ class RMSinterProcessor:
         pending_keys: list[tuple[str, str]] = []
         rows: list[dict[str, Any]] = []
         for shift_key in sorted(requested_shifts):
-            for source, record in sorted(shifts.get(shift_key, {}).items()):
-                if record.get("status") != "pending":
-                    continue
-                pending_keys.append((shift_key, source))
-                rows.append(self._row_from_state(record))
+            record = shifts.get(shift_key, {}).get(ACTIVE_SOURCE)
+            if record is None or record.get("status") != "pending":
+                continue
+            pending_keys.append((shift_key, ACTIVE_SOURCE))
+            rows.append(self._row_from_state(record))
 
         result = pd.DataFrame(
             rows,
@@ -211,8 +206,8 @@ class RMSinterProcessor:
             if duplicate_keys.any():
                 collisions = result.loc[duplicate_keys, "date_time"].astype(str).tolist()
                 raise ValueError(
-                    "RM Sinter events have indistinguishable database timestamps; "
-                    f"cannot preserve both sources without inventing a time: {collisions}"
+                    "RM Sinter produced more than one BF2 row for a shift timestamp: "
+                    f"{collisions}"
                 )
 
         return SinterBatch(

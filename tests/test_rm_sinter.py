@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sys
@@ -79,138 +80,137 @@ class RMSinterEventTests(unittest.TestCase):
         self.processor.stage(batch)
         self.processor.commit(batch)
 
-    def test_bf1_first_uses_anchor_and_bf2_later_uses_real_time(self):
-        first = self._prepare(
-            {"BF1": [_frame("BF1")]},
-            {"BF1": datetime(2026, 10, 8, 8, 15)},
-        )
-        self.assertEqual(first.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
-        self.assertEqual(first.rows.loc[0, "material_code"], "sinter_3")
-        self._accept(first)
-
-        second = self._prepare(
+    def test_bf2_uses_shift_anchor_instead_of_sample_time(self):
+        batch = self._prepare(
             {"BF2": [_frame("BF2", fe_t=54.8, sample_time="09:30HRS")]}
         )
-        self.assertEqual(second.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 09:30"))
-        self.assertEqual(set(second.rows["material_code"]), {"sinter_3"})
 
-    def test_bf2_first_is_source_order_independent(self):
-        first = self._prepare(
-            {"BF2": [_frame("BF2", sample_time="08:20HRS")]}
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(batch.rows.loc[0, "material_code"], "sinter_3")
+        self.assertEqual(
+            batch.pending_keys,
+            (("2026-10-08T07:00:00.000000", "BF2"),),
         )
-        self.assertEqual(first.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
-        self._accept(first)
 
-        second = self._prepare(
-            {"BF1": [_frame("BF1", fe_t=54.9)]},
-            {"BF1": datetime(2026, 10, 8, 11, 15)},
-        )
-        self.assertEqual(second.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:15"))
-
-    def test_both_new_are_sorted_by_event_time_not_source_or_input_order(self):
+    def test_bf1_input_is_ignored(self):
         batch = self._prepare(
             {
-                "BF1": [_frame("BF1", fe_t=54.9)],
+                "BF1": [_frame("BF1", fe_t=54.1)],
                 "BF2": [_frame("BF2", fe_t=54.2, sample_time="08:20HRS")],
             },
             {"BF1": datetime(2026, 10, 8, 11, 15)},
         )
 
-        by_fe = batch.rows.set_index("fe_t")["date_time"].to_dict()
-        self.assertEqual(by_fe[54.2], pd.Timestamp("2026-10-08 07:00"))
-        self.assertEqual(by_fe[54.9], pd.Timestamp("2026-10-08 11:15"))
-        self.assertEqual(set(batch.rows["material_code"]), {"sinter_3"})
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(batch.rows.loc[0, "fe_t"], 54.2)
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
 
-    def test_indistinguishable_times_use_documented_deterministic_tie_breaker(self):
-        with self.assertLogs("test_rm_sinter", level="WARNING") as captured:
-            batch = self._prepare(
+    def test_stale_bf1_state_cannot_create_a_second_shift_row(self):
+        shift_key = "2026-10-08T07:00:00.000000"
+        self.state_path.write_text(
+            json.dumps(
                 {
-                    "BF2": [_frame("BF2", fe_t=54.2)],
-                    "BF1": [_frame("BF1", fe_t=54.1)],
+                    "version": 1,
+                    "shifts": {
+                        shift_key: {
+                            "BF1": {
+                                "assigned_date_time": "2026-10-08T11:15:00.000000",
+                                "status": "pending",
+                            }
+                        }
+                    },
                 }
-            )
+            ),
+            encoding="utf-8",
+        )
 
-        by_fe = batch.rows.set_index("fe_t")["date_time"].to_dict()
-        self.assertEqual(by_fe[54.1], pd.Timestamp("2026-10-08 07:00"))
-        self.assertEqual(by_fe[54.2], pd.Timestamp("2026-10-08 12:00"))
-        self.assertTrue(any("tie-breaker" in message for message in captured.output))
+        batch = self._prepare(
+            {"BF2": [_frame("BF2", fe_t=54.2, sample_time="09:30HRS")]}
+        )
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(set(batch.state["shifts"][shift_key]), {"BF2"})
+
+    def test_multiple_bf2_frames_for_a_shift_produce_one_canonical_row(self):
+        batch = self._prepare(
+            {
+                "BF2": [
+                    _frame("BF2", fe_t=54.1, sample_time="08:20HRS"),
+                    _frame("BF2", fe_t=54.2, sample_time="09:30HRS"),
+                ]
+            }
+        )
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(batch.rows.loc[0, "fe_t"], 54.2)
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
 
     def test_unchanged_normalized_fingerprint_produces_no_row(self):
         first = self._prepare(
-            {"BF1": [_frame("BF1", fe_t="54.4000")]},
-            {"BF1": datetime(2026, 10, 8, 8, 15)},
+            {"BF2": [_frame("BF2", fe_t="54.4000")]},
         )
         self._accept(first)
 
         unchanged = self._prepare(
-            {"BF1": [_frame("BF1", fe_t=54.4)]},
-            {"BF1": datetime(2026, 10, 8, 12, 30)},
+            {"BF2": [_frame("BF2", fe_t=54.4)]},
         )
         self.assertTrue(unchanged.rows.empty)
 
-    def test_same_source_correction_updates_its_assigned_row(self):
-        bf1 = self._prepare(
-            {"BF1": [_frame("BF1", fe_t=54.1)]},
-            {"BF1": datetime(2026, 10, 8, 8, 15)},
+    def test_bf2_correction_updates_the_same_shift_row(self):
+        first = self._prepare(
+            {"BF2": [_frame("BF2", fe_t=54.1, sample_time="08:20HRS")]},
         )
-        self._accept(bf1)
-        bf2 = self._prepare(
-            {"BF2": [_frame("BF2", fe_t=54.2, sample_time="09:30HRS")]}
-        )
-        self._accept(bf2)
+        self._accept(first)
 
         correction = self._prepare(
-            {"BF1": [_frame("BF1", fe_t=55.0)]},
-            {"BF1": datetime(2026, 10, 8, 12, 0)},
+            {"BF2": [_frame("BF2", fe_t=55.0, sample_time="11:45HRS")]},
         )
         self.assertEqual(len(correction.rows), 1)
         self.assertEqual(correction.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
         self.assertEqual(correction.rows.loc[0, "fe_t"], 55.0)
         shift_state = next(iter(correction.state["shifts"].values()))
-        self.assertEqual(set(shift_state), {"BF1", "BF2"})
+        self.assertEqual(set(shift_state), {"BF2"})
 
-    def test_shift_anchors_follow_existing_rm_convention(self):
+    def test_shift_anchors_are_the_required_utc_times_after_db_conversion(self):
         expected = {
-            "A-1": pd.Timestamp("2026-10-08 07:00"),
-            "B-1": pd.Timestamp("2026-10-08 15:00"),
-            "C-1": pd.Timestamp("2026-10-07 23:00"),
+            "A-1": (
+                pd.Timestamp("2026-10-08 07:00"),
+                pd.Timestamp("2026-10-08 01:30", tz="UTC"),
+            ),
+            "B-1": (
+                pd.Timestamp("2026-10-08 15:00"),
+                pd.Timestamp("2026-10-08 09:30", tz="UTC"),
+            ),
+            "C-1": (
+                pd.Timestamp("2026-10-07 23:00"),
+                pd.Timestamp("2026-10-07 17:30", tz="UTC"),
+            ),
         }
-        for shift, timestamp in expected.items():
+        for shift, (local_timestamp, utc_timestamp) in expected.items():
             with self.subTest(shift=shift):
-                state_path = Path(self.temp_dir.name) / f"{shift[0]}.json"
+                state_path = self.temp_dir / f"{shift[0]}.json"
                 processor = RMSinterProcessor(LOGGER, state_path)
                 batch = processor.prepare(
                     {"BF2": [_frame("BF2", shift=shift, sample_time="18:30HRS")]},
                     [RUN_DATE],
                 )
-                self.assertEqual(batch.rows.loc[0, "date_time"], timestamp)
+                actual = batch.rows.loc[0, "date_time"]
+                self.assertEqual(actual, local_timestamp)
+                self.assertEqual(
+                    actual.tz_localize("Asia/Kolkata").tz_convert("UTC"),
+                    utc_timestamp,
+                )
 
-    def test_second_c_shift_sample_after_midnight_uses_next_calendar_day(self):
+    def test_c_shift_sample_time_does_not_replace_the_shift_anchor(self):
         first = self._prepare(
-            {"BF1": [_frame("BF1", shift="C-1", fe_t=54.1)]},
-            {"BF1": datetime(2026, 10, 7, 23, 15)},
+            {"BF2": [_frame("BF2", shift="C-1", fe_t=54.1, sample_time="00:30HRS")]},
         )
         self.assertEqual(first.rows.loc[0, "date_time"], pd.Timestamp("2026-10-07 23:00"))
-        self._accept(first)
 
-        second = self._prepare(
-            {"BF2": [_frame("BF2", shift="C-2", fe_t=54.2, sample_time="00:30HRS")]}
-        )
-        self.assertEqual(second.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 00:30"))
-
-    def test_bf1_and_bf2_online_both_map_to_sinter_3(self):
-        batch = self._prepare(
-            {
-                "BF1": [_frame("BF1", fe_t=54.1)],
-                "BF2": [_frame("BF2", fe_t=54.2, sample_time="09:30HRS")],
-            },
-            {"BF1": datetime(2026, 10, 8, 8, 15)},
-        )
-        self.assertEqual(set(batch.rows["material_code"]), {"sinter_3"})
-        self.assertEqual(len(batch.rows), 2)
-
-    def test_bf1_offline_is_ignored_by_dedicated_path_and_mapping_is_preserved(self):
-        batch = self._prepare({"BF1": [_frame("BF1", online=False)]})
+    def test_bf2_offline_is_ignored_and_offline_mapping_is_preserved(self):
+        batch = self._prepare({"BF2": [_frame("BF2", online=False)]})
         self.assertTrue(batch.rows.empty)
         self.assertEqual(
             RM_CONFIG["neon"]["category_map"]["sinter sp 01 offline"]["material_code"],
@@ -223,8 +223,7 @@ class RMSinterEventTests(unittest.TestCase):
 
     def test_staged_but_uncommitted_event_retries_with_same_assignment(self):
         first = self._prepare(
-            {"BF1": [_frame("BF1")]},
-            {"BF1": datetime(2026, 10, 8, 8, 15)},
+            {"BF2": [_frame("BF2", sample_time="08:20HRS")]},
         )
         self.processor.stage(first)
 
@@ -234,9 +233,8 @@ class RMSinterEventTests(unittest.TestCase):
             now=lambda: datetime(2026, 10, 8, 13, 0),
         )
         retry = restarted.prepare(
-            {"BF1": [_frame("BF1")]},
+            {"BF2": [_frame("BF2", sample_time="08:20HRS")]},
             [RUN_DATE],
-            {"BF1": datetime(2026, 10, 8, 13, 0)},
         )
         self.assertEqual(len(retry.rows), 1)
         self.assertEqual(retry.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
@@ -256,6 +254,33 @@ class RMSinterEventTests(unittest.TestCase):
 
 
 class RMSinterNeonTests(unittest.TestCase):
+    def test_database_boundary_rejects_non_shift_sinter_timestamp(self):
+        invalid = pd.DataFrame(
+            {
+                "date_time": pd.to_datetime(["2026-10-08 09:30"]),
+                "material_code": ["sinter_3"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "01:30, 09:30, or 17:30 UTC"):
+            RMService._validate_sinter_shift_timestamps(invalid)
+
+    def test_database_boundary_accepts_required_utc_sinter_timestamps(self):
+        valid = pd.DataFrame(
+            {
+                "date_time": pd.to_datetime(
+                    [
+                        "2026-10-08 01:30Z",
+                        "2026-10-08 09:30Z",
+                        "2026-10-08 17:30Z",
+                    ]
+                ),
+                "material_code": ["sinter_3"] * 3,
+            }
+        )
+
+        RMService._validate_sinter_shift_timestamps(valid)
+
     def test_service_writes_dedicated_and_offline_rows_with_existing_conflict_key(self):
         client = Mock()
         client.fetch_material_codes.return_value = {"sinter_2", "sinter_3"}
@@ -274,7 +299,7 @@ class RMSinterNeonTests(unittest.TestCase):
         )
         dedicated = pd.DataFrame(
             {
-                "date_time": pd.to_datetime(["2026-10-08 09:30"]),
+                "date_time": pd.to_datetime(["2026-10-08 07:00"]),
                 "fe_t": [54.8],
                 "material_code": ["sinter_3"],
             }

@@ -148,6 +148,38 @@ class RMService:
     def _file_modified_at(file_path: str) -> datetime:
         return datetime.fromtimestamp(Path(file_path).stat().st_mtime, BUSINESS_TZ)
 
+    @staticmethod
+    def _validate_sinter_shift_timestamps(df: pd.DataFrame) -> None:
+        """Reject Sinter rows outside the three canonical BF2 shift timestamps."""
+        if df.empty:
+            return
+        if "date_time" not in df.columns:
+            raise ValueError("RM Sinter rows are missing the required date_time column")
+
+        timestamps = pd.to_datetime(df["date_time"], errors="coerce")
+        if timestamps.dt.tz is not None:
+            local_timestamps = timestamps.dt.tz_convert(BUSINESS_TZ).dt.tz_localize(None)
+        else:
+            local_timestamps = timestamps
+
+        valid = (
+            local_timestamps.notna()
+            & local_timestamps.dt.hour.isin({7, 15, 23})
+            & local_timestamps.dt.minute.eq(0)
+            & local_timestamps.dt.second.eq(0)
+            & local_timestamps.dt.microsecond.eq(0)
+            & local_timestamps.dt.nanosecond.eq(0)
+        )
+        if valid.all():
+            return
+
+        invalid_values = df.loc[~valid, "date_time"].astype(str).tolist()
+        raise ValueError(
+            "RM Sinter rows must use only the BF2 shift timestamps "
+            "01:30, 09:30, or 17:30 UTC "
+            f"(07:00, 15:00, or 23:00 Asia/Kolkata); got {invalid_values}"
+        )
+
     def _output_settings(self, rm_cfg: dict[str, Any]) -> tuple[Path, str]:
         output_cfg = rm_cfg.get("output", {})
         output_dir = Path(output_cfg.get("dir", DEFAULT_OUTPUT_DIR))
@@ -494,6 +526,7 @@ class RMService:
 
         sinter_rows = 0
         if sinter_df is not None and not sinter_df.empty:
+            self._validate_sinter_shift_timestamps(sinter_df)
             material_code = "sinter_3"
             if material_codes and material_code.lower() not in {
                 str(code).lower() for code in material_codes
