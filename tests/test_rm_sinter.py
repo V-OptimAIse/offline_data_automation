@@ -27,11 +27,12 @@ RUN_DATE = date(2026, 10, 8)
 def _frame(
     source: str,
     *,
-    shift: str = "A-1",
+    shift: str | None = None,
     fe_t: object = 54.4,
     sample_time: str | None = None,
     online: bool = True,
 ) -> pd.DataFrame:
+    shift = shift or ("A-1" if source == "BF1" else "A-2")
     row = {
         "DATE": datetime(2026, 10, 8),
         "SHIFT": shift,
@@ -86,14 +87,16 @@ class RMSinterEventTests(unittest.TestCase):
         )
 
         self.assertEqual(len(batch.rows), 1)
-        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(
+            batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:00")
+        )
         self.assertEqual(batch.rows.loc[0, "material_code"], "sinter_3")
         self.assertEqual(
             batch.pending_keys,
-            (("2026-10-08T07:00:00.000000", "BF2"),),
+            (("2026-10-08T11:00:00.000000", "BF2"),),
         )
 
-    def test_bf1_input_is_ignored(self):
+    def test_bf1_and_bf2_use_sinter_3_and_half_shift_anchors(self):
         batch = self._prepare(
             {
                 "BF1": [_frame("BF1", fe_t=54.1)],
@@ -102,11 +105,19 @@ class RMSinterEventTests(unittest.TestCase):
             {"BF1": datetime(2026, 10, 8, 11, 15)},
         )
 
-        self.assertEqual(len(batch.rows), 1)
-        self.assertEqual(batch.rows.loc[0, "fe_t"], 54.2)
-        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(len(batch.rows), 2)
+        actual = batch.rows.sort_values("date_time").reset_index(drop=True)
+        self.assertEqual(set(actual["material_code"]), {"sinter_3"})
+        self.assertEqual(actual.loc[0, "fe_t"], 54.1)
+        self.assertEqual(
+            actual.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00")
+        )
+        self.assertEqual(actual.loc[1, "fe_t"], 54.2)
+        self.assertEqual(
+            actual.loc[1, "date_time"], pd.Timestamp("2026-10-08 11:00")
+        )
 
-    def test_stale_bf1_state_cannot_create_a_second_shift_row(self):
+    def test_legacy_state_resets_before_new_half_shift_assignment(self):
         shift_key = "2026-10-08T07:00:00.000000"
         self.state_path.write_text(
             json.dumps(
@@ -130,8 +141,9 @@ class RMSinterEventTests(unittest.TestCase):
         )
 
         self.assertEqual(len(batch.rows), 1)
-        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
-        self.assertEqual(set(batch.state["shifts"][shift_key]), {"BF2"})
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:00"))
+        self.assertEqual(batch.state["version"], 3)
+        self.assertNotIn(shift_key, batch.state["shifts"])
 
     def test_multiple_bf2_frames_for_a_shift_produce_one_canonical_row(self):
         batch = self._prepare(
@@ -145,7 +157,7 @@ class RMSinterEventTests(unittest.TestCase):
 
         self.assertEqual(len(batch.rows), 1)
         self.assertEqual(batch.rows.loc[0, "fe_t"], 54.2)
-        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(batch.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:00"))
 
     def test_unchanged_normalized_fingerprint_produces_no_row(self):
         first = self._prepare(
@@ -168,7 +180,9 @@ class RMSinterEventTests(unittest.TestCase):
             {"BF2": [_frame("BF2", fe_t=55.0, sample_time="11:45HRS")]},
         )
         self.assertEqual(len(correction.rows), 1)
-        self.assertEqual(correction.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(
+            correction.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:00")
+        )
         self.assertEqual(correction.rows.loc[0, "fe_t"], 55.0)
         shift_state = next(iter(correction.state["shifts"].values()))
         self.assertEqual(set(shift_state), {"BF2"})
@@ -179,21 +193,34 @@ class RMSinterEventTests(unittest.TestCase):
                 pd.Timestamp("2026-10-08 07:00"),
                 pd.Timestamp("2026-10-08 01:30", tz="UTC"),
             ),
+            "A-2": (
+                pd.Timestamp("2026-10-08 11:00"),
+                pd.Timestamp("2026-10-08 05:30", tz="UTC"),
+            ),
             "B-1": (
                 pd.Timestamp("2026-10-08 15:00"),
                 pd.Timestamp("2026-10-08 09:30", tz="UTC"),
+            ),
+            "B-2": (
+                pd.Timestamp("2026-10-08 19:00"),
+                pd.Timestamp("2026-10-08 13:30", tz="UTC"),
             ),
             "C-1": (
                 pd.Timestamp("2026-10-07 23:00"),
                 pd.Timestamp("2026-10-07 17:30", tz="UTC"),
             ),
+            "C-2": (
+                pd.Timestamp("2026-10-08 03:00"),
+                pd.Timestamp("2026-10-07 21:30", tz="UTC"),
+            ),
         }
         for shift, (local_timestamp, utc_timestamp) in expected.items():
             with self.subTest(shift=shift):
-                state_path = self.temp_dir / f"{shift[0]}.json"
+                state_path = self.temp_dir / f"{shift}.json"
                 processor = RMSinterProcessor(LOGGER, state_path)
+                source = "BF1" if shift.endswith("-1") else "BF2"
                 batch = processor.prepare(
-                    {"BF2": [_frame("BF2", shift=shift, sample_time="18:30HRS")]},
+                    {source: [_frame(source, shift=shift, sample_time="18:30HRS")]},
                     [RUN_DATE],
                 )
                 actual = batch.rows.loc[0, "date_time"]
@@ -205,20 +232,32 @@ class RMSinterEventTests(unittest.TestCase):
 
     def test_c_shift_sample_time_does_not_replace_the_shift_anchor(self):
         first = self._prepare(
-            {"BF2": [_frame("BF2", shift="C-1", fe_t=54.1, sample_time="00:30HRS")]},
+            {
+                "BF2": [
+                    _frame("BF2", shift="C-2", fe_t=54.1, sample_time="00:30HRS")
+                ]
+            },
         )
-        self.assertEqual(first.rows.loc[0, "date_time"], pd.Timestamp("2026-10-07 23:00"))
+        self.assertEqual(first.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 03:00"))
 
-    def test_bf2_offline_is_ignored_and_offline_mapping_is_preserved(self):
-        batch = self._prepare({"BF2": [_frame("BF2", online=False)]})
-        self.assertTrue(batch.rows.empty)
-        self.assertEqual(
-            RM_CONFIG["neon"]["category_map"]["sinter sp 01 offline"]["material_code"],
-            "sinter_2",
+    def test_online_offline_status_is_ignored_for_bf1_and_bf2(self):
+        batch = self._prepare(
+            {
+                "BF1": [_frame("BF1", fe_t=54.1, online=False)],
+                "BF2": [_frame("BF2", fe_t=54.2, online=False)],
+            }
         )
+
+        actual = batch.rows.sort_values("date_time").reset_index(drop=True)
+        self.assertEqual(len(actual), 2)
+        self.assertEqual(set(actual["material_code"]), {"sinter_3"})
+        self.assertEqual(actual["fe_t"].tolist(), [54.1, 54.2])
         self.assertEqual(
-            RM_CONFIG["neon"]["category_map"]["sinter sp 02 offline"]["material_code"],
-            "sinter_4",
+            actual["date_time"].tolist(),
+            [
+                pd.Timestamp("2026-10-08 07:00"),
+                pd.Timestamp("2026-10-08 11:00"),
+            ],
         )
 
     def test_staged_but_uncommitted_event_retries_with_same_assignment(self):
@@ -237,7 +276,9 @@ class RMSinterEventTests(unittest.TestCase):
             [RUN_DATE],
         )
         self.assertEqual(len(retry.rows), 1)
-        self.assertEqual(retry.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 07:00"))
+        self.assertEqual(
+            retry.rows.loc[0, "date_time"], pd.Timestamp("2026-10-08 11:00")
+        )
 
     def test_bf2_file_change_without_chemistry_change_produces_no_row(self):
         first = self._prepare(
@@ -262,7 +303,7 @@ class RMSinterNeonTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(ValueError, "01:30, 09:30, or 17:30 UTC"):
+        with self.assertRaisesRegex(ValueError, "03:00, 07:00, 11:00"):
             RMService._validate_sinter_shift_timestamps(invalid)
 
     def test_database_boundary_accepts_required_utc_sinter_timestamps(self):
@@ -270,20 +311,23 @@ class RMSinterNeonTests(unittest.TestCase):
             {
                 "date_time": pd.to_datetime(
                     [
+                        "2026-10-07 21:30Z",
                         "2026-10-08 01:30Z",
+                        "2026-10-08 05:30Z",
                         "2026-10-08 09:30Z",
+                        "2026-10-08 13:30Z",
                         "2026-10-08 17:30Z",
                     ]
                 ),
-                "material_code": ["sinter_3"] * 3,
+                "material_code": ["sinter_3"] * 6,
             }
         )
 
         RMService._validate_sinter_shift_timestamps(valid)
 
-    def test_service_writes_dedicated_and_offline_rows_with_existing_conflict_key(self):
+    def test_service_writes_only_dedicated_sinter_rows(self):
         client = Mock()
-        client.fetch_material_codes.return_value = {"sinter_2", "sinter_3"}
+        client.fetch_material_codes.return_value = {"sinter_1", "sinter_2", "sinter_3"}
         target_columns = {"date_time", "material_code", "fe_t"}
         client.fetch_table_columns.side_effect = lambda schema, tables: {
             table: set(target_columns) for table in tables
@@ -299,9 +343,11 @@ class RMSinterNeonTests(unittest.TestCase):
         )
         dedicated = pd.DataFrame(
             {
-                "date_time": pd.to_datetime(["2026-10-08 07:00"]),
-                "fe_t": [54.8],
-                "material_code": ["sinter_3"],
+                "date_time": pd.to_datetime(
+                    ["2026-10-08 07:00", "2026-10-08 11:00"]
+                ),
+                "fe_t": [54.1, 54.8],
+                "material_code": ["sinter_3", "sinter_3"],
             }
         )
 
@@ -312,12 +358,14 @@ class RMSinterNeonTests(unittest.TestCase):
             sinter_df=dedicated,
         )
 
-        self.assertEqual((total, dedicated_count), (2, 1))
-        written_materials = {
-            call.kwargs["df"]["material_code"].iloc[0]
-            for call in client.insert_dataframe.call_args_list
-        }
-        self.assertEqual(written_materials, {"sinter_2", "sinter_3"})
+        self.assertEqual((total, dedicated_count), (2, 2))
+        written_materials = set().union(
+            *(
+                set(call.kwargs["df"]["material_code"])
+                for call in client.insert_dataframe.call_args_list
+            )
+        )
+        self.assertEqual(written_materials, {"sinter_3"})
         for call in client.insert_dataframe.call_args_list:
             self.assertEqual(
                 call.kwargs["conflict_cols"],

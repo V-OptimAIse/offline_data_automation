@@ -23,33 +23,40 @@ RM_CONFIG = load_yaml("src/config/rm.yaml")["rm"]
 
 
 class RMSinterReaderTests(unittest.TestCase):
-    def test_bf01_source_is_not_read_by_default(self):
+    def test_bf01_source_reads_only_the_configured_sinter_sheet(self):
         service = RMService(LOGGER)
         service.reader = Mock()
+        service.reader.read.return_value = [
+            (pd.DataFrame(), "SINTER_SP_01_", "BF-SKIP SINTER")
+        ]
+        service._process_sheets = Mock(return_value=[])
+        service._file_modified_at = Mock(return_value=datetime(2026, 10, 23, 12, 0))
         config = {
             "rm": {
                 "output": {"dir": "tests/.rm-bf1-disabled-test"},
                 "run_date_format": "%d-%b-%Y",
                 "invalid_markers": [],
+                "read_sinter_bf1": True,
+                "sinter_sheet_config": RM_CONFIG["sinter_sheet_config"],
             }
         }
 
-        with self.assertLogs("test_rm", level="INFO") as captured:
-            result = service.process(
-                rm_file=None,
-                setting_cfg=config,
-                run_dates=["23-Oct-2026"],
-                sinter_file="11 BF-01 BUNKER.xlsx",
-            )
-
-        self.assertTrue(result.empty)
-        service.reader.read.assert_not_called()
-        self.assertTrue(
-            any("BF1 reading is disabled" in message for message in captured.output)
+        result = service.process(
+            rm_file=None,
+            setting_cfg=config,
+            run_dates=["23-Oct-2026"],
+            sinter_file="11 BF-01 BUNKER.xlsx",
         )
 
-    def test_project_configuration_is_bf2_only(self):
-        self.assertFalse(RM_CONFIG["read_sinter_bf1"])
+        self.assertTrue(result.empty)
+        service.reader.read.assert_called_once_with(
+            "11 BF-01 BUNKER.xlsx",
+            RM_CONFIG["sinter_sheet_config"],
+        )
+        self.assertEqual(service._process_sheets.call_args.kwargs["frames"], [])
+
+    def test_project_configuration_enables_bf1_sinter(self):
+        self.assertTrue(RM_CONFIG["read_sinter_bf1"])
 
     @patch("domains.rm.reader.pd.read_excel")
     @patch("domains.rm.reader.pd.ExcelFile")
@@ -112,7 +119,7 @@ class RMSinterReaderTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "SINTER_SP_01_%FE(T)_ON"], 54.4)
         self.assertEqual(result.loc[0, "SINTER_SP_01_%FE(T)_OFF"], 53.2)
 
-    def test_online_sinter_is_not_written_by_the_generic_mapper(self):
+    def test_all_sinter_is_not_written_by_the_generic_mapper(self):
         frame = pd.DataFrame(
             {
                 "date": pd.to_datetime(["2026-09-28 07:00"]),
@@ -129,12 +136,7 @@ class RMSinterReaderTests(unittest.TestCase):
 
         outputs = list(mapper.iter_table_dfs(frame))
 
-        self.assertEqual(len(outputs), 2)
-        self.assertEqual(
-            {result["material_code"].iloc[0] for _, result in outputs},
-            {"sinter_2", "sinter_4"},
-        )
-        self.assertTrue(all(table == "sinter_chemistry" for table, _ in outputs))
+        self.assertEqual(outputs, [])
 
 
 if __name__ == "__main__":

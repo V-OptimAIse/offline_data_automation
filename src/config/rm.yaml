@@ -1,6 +1,6 @@
 rm:
-  # BF1 Sinter ingestion is paused; RM reads and stores BF2 data only.
-  read_sinter_bf1: false
+  # BF1 contributes only BF-SKIP SINTER chemistry; all other RM sheets stay BF2-only.
+  read_sinter_bf1: true
 
   output:
     dir: output/rm
@@ -36,9 +36,9 @@ rm:
       "flux 3":                {table: flux_chemistry,   material_code: flux_3}
 
       "sinter sp 02 online":   {table: sinter_chemistry, material_code: sinter_3}
-      "sinter sp 02 offline":  {table: sinter_chemistry, material_code: sinter_4}
-      "sinter sp 01 online":   {table: sinter_chemistry, material_code: sinter_1}
-      "sinter sp 01 offline":  {table: sinter_chemistry, material_code: sinter_2}
+      "sinter sp 02 offline":  {table: sinter_chemistry, material_code: sinter_3}
+      "sinter sp 01 online":   {table: sinter_chemistry, material_code: sinter_3}
+      "sinter sp 01 offline":  {table: sinter_chemistry, material_code: sinter_3}
 
       "ore 1":                 {table: ore_chemistry,    material_code: ore_1}
       "ore 2":                 {table: ore_chemistry,    material_code: ore_2}

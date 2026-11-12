@@ -7,7 +7,9 @@ from typing import Iterator
 
 DEDICATED_SINTER_CATEGORIES = {
     "sinter sp 01 online",
+    "sinter sp 01 offline",
     "sinter sp 02 online",
+    "sinter sp 02 offline",
 }
 
 

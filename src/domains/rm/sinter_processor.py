@@ -18,9 +18,10 @@ import pandas as pd
 
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
-MATERIAL_CODE = "sinter_3"
-ACTIVE_SOURCE = "BF2"
-STATE_VERSION = 1
+SOURCE_MATERIAL_CODES = {"BF1": "sinter_3", "BF2": "sinter_3"}
+ACTIVE_SOURCES = tuple(SOURCE_MATERIAL_CODES)
+DEFAULT_SHIFT_SLOT = {"BF1": "1", "BF2": "2"}
+STATE_VERSION = 3
 
 CHEMISTRY_FIELDS = (
     "fe_t",
@@ -70,7 +71,15 @@ TIMESTAMP_HEADERS = (
     "TIME",
 )
 
-SHIFT_TIME = {"A": time(7), "B": time(15), "C": time(23)}
+SHIFT_TIME = {
+    "A-1": time(7),
+    "A-2": time(11),
+    "B-1": time(15),
+    "B-2": time(19),
+    "C-1": time(23),
+    "C-2": time(3),
+}
+PREVIOUS_DAY_SHIFTS = {"C-1"}
 INVALID_VALUES = {"", "-", "N/A", "NA", "NAN", "NONE", "NR", "NULL", "STOP"}
 
 
@@ -92,7 +101,7 @@ class SinterBatch:
 
 
 class RMSinterProcessor:
-    """Build one restart-safe BF2 online Sinter event per production shift."""
+    """Build restart-safe BF1/BF2 Sinter events at half-shift anchors."""
 
     def __init__(
         self,
@@ -117,50 +126,53 @@ class RMSinterProcessor:
             if not isinstance(shift_state, dict):
                 continue
             for source in tuple(shift_state):
-                if source != ACTIVE_SOURCE:
+                if source not in ACTIVE_SOURCES:
                     del shift_state[source]
                     removed_sources += 1
         if removed_sources:
             self.logger.info(
                 f"RM Sinter ignored {removed_sources} inactive source state record(s); "
-                f"only {ACTIVE_SOURCE} is enabled"
+                f"enabled sources are {', '.join(ACTIVE_SOURCES)}"
             )
         source_modified_at = source_modified_at or {}
         detected_at = self._local_naive(self._now())
 
         events: list[SinterEvent] = []
-        fallback = source_modified_at.get(ACTIVE_SOURCE)
-        fallback_source = "source_modified" if fallback is not None else "first_detection"
-        fallback_time = self._local_naive(fallback or detected_at)
-        for frame in source_frames.get(ACTIVE_SOURCE, []):
-            events.extend(
-                self._extract_frame_events(
-                    frame=frame,
-                    source=ACTIVE_SOURCE,
-                    run_dates=set(run_dates),
-                    fallback_time=fallback_time,
-                    fallback_source=fallback_source,
-                )
+        for source in ACTIVE_SOURCES:
+            fallback = source_modified_at.get(source)
+            fallback_source = (
+                "source_modified" if fallback is not None else "first_detection"
             )
+            fallback_time = self._local_naive(fallback or detected_at)
+            for frame in source_frames.get(source, []):
+                events.extend(
+                    self._extract_frame_events(
+                        frame=frame,
+                        source=source,
+                        run_dates=set(run_dates),
+                        fallback_time=fallback_time,
+                        fallback_source=fallback_source,
+                    )
+                )
 
-        events_by_shift: dict[str, list[SinterEvent]] = {}
+        events_by_shift: dict[tuple[str, str], list[SinterEvent]] = {}
         for event in events:
             shift_key = self._format_datetime(event.shift_anchor)
-            events_by_shift.setdefault(shift_key, []).append(event)
+            events_by_shift.setdefault((shift_key, event.source), []).append(event)
 
-        for shift_key, shift_events in events_by_shift.items():
+        for (shift_key, source), shift_events in events_by_shift.items():
             shift_state = shifts.setdefault(shift_key, {})
             # A reader can return more than one frame for the same sheet. Keep the
-            # latest BF2 event, but always store it at the production-shift anchor.
+            # latest source event, but always store it at the half-shift anchor.
             # The Neon client interprets this naive value as Asia/Kolkata and writes
-            # it as UTC (07:00/15:00/23:00 IST => 01:30/09:30/17:30 UTC).
+            # it as UTC.
             event = max(
                 enumerate(shift_events),
                 key=lambda item: (item[1].event_time, item[0]),
             )[1]
             assigned = event.shift_anchor
             assigned_text = self._format_datetime(assigned)
-            current = shift_state.get(ACTIVE_SOURCE)
+            current = shift_state.get(source)
 
             if (
                 current is not None
@@ -170,14 +182,14 @@ class RMSinterProcessor:
                 continue
 
             is_correction = current is not None
-            shift_state[ACTIVE_SOURCE] = {
+            shift_state[source] = {
                 **self._state_values(event),
                 "assigned_date_time": assigned_text,
                 "status": "pending",
             }
             action = "correction" if is_correction else "event"
             self.logger.info(
-                f"RM Sinter {action} accepted: {ACTIVE_SOURCE} shift={shift_key} "
+                f"RM Sinter {action} accepted: {source} shift={shift_key} "
                 f"assigned={assigned_text} timestamp_source={event.event_time_source}"
             )
 
@@ -189,11 +201,12 @@ class RMSinterProcessor:
         pending_keys: list[tuple[str, str]] = []
         rows: list[dict[str, Any]] = []
         for shift_key in sorted(requested_shifts):
-            record = shifts.get(shift_key, {}).get(ACTIVE_SOURCE)
-            if record is None or record.get("status") != "pending":
-                continue
-            pending_keys.append((shift_key, ACTIVE_SOURCE))
-            rows.append(self._row_from_state(record))
+            for source in ACTIVE_SOURCES:
+                record = shifts.get(shift_key, {}).get(source)
+                if record is None or record.get("status") != "pending":
+                    continue
+                pending_keys.append((shift_key, source))
+                rows.append(self._row_from_state(record, source))
 
         result = pd.DataFrame(
             rows,
@@ -206,7 +219,7 @@ class RMSinterProcessor:
             if duplicate_keys.any():
                 collisions = result.loc[duplicate_keys, "date_time"].astype(str).tolist()
                 raise ValueError(
-                    "RM Sinter produced more than one BF2 row for a shift timestamp: "
+                    "RM Sinter produced duplicate material/timestamp rows: "
                     f"{collisions}"
                 )
 
@@ -233,7 +246,11 @@ class RMSinterProcessor:
 
     @staticmethod
     def shift_anchor(run_date: date, shift: str) -> datetime:
-        anchor_date = run_date - timedelta(days=1) if shift == "C" else run_date
+        anchor_date = (
+            run_date - timedelta(days=1)
+            if shift in PREVIOUS_DAY_SHIFTS
+            else run_date
+        )
         return datetime.combine(anchor_date, SHIFT_TIME[shift])
 
     def _extract_frame_events(
@@ -268,12 +285,9 @@ class RMSinterProcessor:
         candidates: dict[datetime, tuple[tuple[datetime, int], SinterEvent]] = {}
         for position, (_, row) in enumerate(df.iterrows()):
             run_date = self._parse_date(row.get(date_col))
-            shift = self._parse_shift(row.get(shift_col))
+            shift = self._parse_shift(row.get(shift_col), source)
             if run_date is None or run_date not in run_dates or shift is None:
                 continue
-            if not self._is_online(row, by_header, source):
-                continue
-
             chemistry = {field: None for field in CHEMISTRY_FIELDS}
             for field, column in chemistry_columns.items():
                 chemistry[field] = self._numeric_value(row.get(column))
@@ -371,7 +385,7 @@ class RMSinterProcessor:
     @staticmethod
     def _combine_clock(run_date: date, shift: str, clock: time) -> datetime:
         event_date = run_date
-        if shift == "C" and clock.hour >= 23:
+        if shift.startswith("C") and clock.hour >= 23:
             event_date -= timedelta(days=1)
         return datetime.combine(event_date, clock)
 
@@ -418,17 +432,14 @@ class RMSinterProcessor:
         return None if pd.isna(parsed) else parsed.date()
 
     @staticmethod
-    def _parse_shift(value: Any) -> str | None:
+    def _parse_shift(value: Any, source: str) -> str | None:
         text = str(value).strip().upper()
-        return text[0] if text and text[0] in SHIFT_TIME else None
-
-    @staticmethod
-    def _is_online(row: pd.Series, by_header: dict[str, Any], source: str) -> bool:
-        status_col = by_header.get("ONLINEOFFLINE") or by_header.get("BUNKERNO")
-        if status_col is None:
-            return source == "BF2"
-        status = str(row.get(status_col, "")).strip().upper()
-        return "ONLINE" in status or "EML" in status
+        match = re.match(r"^([ABC])(?:\s*[-_/]?\s*([12]))?", text)
+        if match is None:
+            return None
+        group, slot = match.groups()
+        candidate = f"{group}-{slot or DEFAULT_SHIFT_SLOT[source]}"
+        return candidate if candidate in SHIFT_TIME else None
 
     @staticmethod
     def _local_naive(value: datetime) -> datetime:
@@ -447,12 +458,12 @@ class RMSinterProcessor:
         }
 
     @staticmethod
-    def _row_from_state(record: dict[str, Any]) -> dict[str, Any]:
+    def _row_from_state(record: dict[str, Any], source: str) -> dict[str, Any]:
         chemistry = record.get("chemistry", {})
         return {
             "date_time": pd.Timestamp(record["assigned_date_time"]),
             **{field: chemistry.get(field) for field in CHEMISTRY_FIELDS},
-            "material_code": MATERIAL_CODE,
+            "material_code": SOURCE_MATERIAL_CODES[source],
         }
 
     @staticmethod
@@ -467,6 +478,14 @@ class RMSinterProcessor:
                 state = json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Could not read RM Sinter state: {self.state_path}") from exc
+        if state.get("version") in {1, 2} and isinstance(
+            state.get("shifts"), dict
+        ):
+            self.logger.info(
+                "RM Sinter reset legacy state because shift timestamps or "
+                "material-code mapping changed"
+            )
+            return {"version": STATE_VERSION, "shifts": {}}
         if state.get("version") != STATE_VERSION or not isinstance(
             state.get("shifts"), dict
         ):

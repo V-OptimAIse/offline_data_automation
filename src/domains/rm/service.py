@@ -72,7 +72,6 @@ class RMService:
                 sinter_file,
                 rm_cfg["sinter_sheet_config"],
             )
-            frames.extend(bf1_frames)
             sinter_source_frames["BF1"].extend(
                 frame.copy() for frame, _, _ in bf1_frames
             )
@@ -150,7 +149,7 @@ class RMService:
 
     @staticmethod
     def _validate_sinter_shift_timestamps(df: pd.DataFrame) -> None:
-        """Reject Sinter rows outside the three canonical BF2 shift timestamps."""
+        """Reject Sinter rows outside the six canonical half-shift timestamps."""
         if df.empty:
             return
         if "date_time" not in df.columns:
@@ -164,7 +163,7 @@ class RMService:
 
         valid = (
             local_timestamps.notna()
-            & local_timestamps.dt.hour.isin({7, 15, 23})
+            & local_timestamps.dt.hour.isin({3, 7, 11, 15, 19, 23})
             & local_timestamps.dt.minute.eq(0)
             & local_timestamps.dt.second.eq(0)
             & local_timestamps.dt.microsecond.eq(0)
@@ -175,9 +174,8 @@ class RMService:
 
         invalid_values = df.loc[~valid, "date_time"].astype(str).tolist()
         raise ValueError(
-            "RM Sinter rows must use only the BF2 shift timestamps "
-            "01:30, 09:30, or 17:30 UTC "
-            f"(07:00, 15:00, or 23:00 Asia/Kolkata); got {invalid_values}"
+            "RM Sinter rows must use only 03:00, 07:00, 11:00, 15:00, "
+            f"19:00, or 23:00 Asia/Kolkata; got {invalid_values}"
         )
 
     def _output_settings(self, rm_cfg: dict[str, Any]) -> tuple[Path, str]:
@@ -527,14 +525,29 @@ class RMService:
         sinter_rows = 0
         if sinter_df is not None and not sinter_df.empty:
             self._validate_sinter_shift_timestamps(sinter_df)
-            material_code = "sinter_3"
-            if material_codes and material_code.lower() not in {
-                str(code).lower() for code in material_codes
-            }:
+            available_codes = {str(code).lower() for code in material_codes}
+            requested_codes = {
+                str(code).lower()
+                for code in sinter_df["material_code"].dropna().unique()
+            }
+            missing_codes = (
+                requested_codes - available_codes if available_codes else set()
+            )
+            for material_code in sorted(missing_codes):
                 self.logger.warning(
                     f"Material code not found in master table: {material_code}"
                 )
-            else:
+
+            eligible_sinter_df = sinter_df
+            if missing_codes:
+                eligible_sinter_df = sinter_df[
+                    ~sinter_df["material_code"]
+                    .astype(str)
+                    .str.lower()
+                    .isin(missing_codes)
+                ]
+
+            if not eligible_sinter_df.empty:
                 table = "sinter_chemistry"
                 valid_columns = table_columns[table]
                 required_columns = {"date_time", "material_code"}
@@ -547,7 +560,7 @@ class RMService:
 
                 skipped_columns = [
                     column
-                    for column in sinter_df.columns
+                    for column in eligible_sinter_df.columns
                     if column not in valid_columns
                 ]
                 for column in skipped_columns:
@@ -556,10 +569,10 @@ class RMService:
                     )
                 selected_columns = [
                     column
-                    for column in sinter_df.columns
+                    for column in eligible_sinter_df.columns
                     if column in valid_columns
                 ]
-                table_df = sinter_df[selected_columns].copy()
+                table_df = eligible_sinter_df[selected_columns].copy()
                 target_table = f"{schema}.{table}" if schema else table
                 try:
                     sinter_rows = neon_client.insert_dataframe(

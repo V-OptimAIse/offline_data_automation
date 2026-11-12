@@ -87,7 +87,7 @@ class FilenameMatchingTests(unittest.TestCase):
     def test_base_config_keeps_stable_identifiers(self):
         portal_files = load_yaml("src/config/base.yaml")["portal_files"]
         self.assertEqual(portal_files["rm"], "BF-02 BUNKER")
-        self.assertNotIn("rm_sinter", portal_files)
+        self.assertEqual(portal_files["rm_sinter"], "BF-01 BUNKER")
         self.assertEqual(portal_files["dust_chemical"], "GCP DUST CATCHER")
 
 
@@ -106,13 +106,14 @@ class DownloaderTests(unittest.TestCase):
             charge_folder_path="/V-Optimaise Data/BF2 AUTO REPORTS/CHARGE AND DUMP/HOURLY",
             portal_files={
                 "rm": "BF-02 BUNKER",
+                "rm_sinter": "BF-01 BUNKER",
                 "fines_analysis": "BF-02 BUNKER",
                 "dust_basic": "BF-02 BUNKER",
                 "dust_chemical": "GCP DUST CATCHER",
             },
         )
 
-    def test_shared_bf02_is_downloaded_once_and_fans_out(self):
+    def test_rm_downloads_both_bunkers_and_shared_bf02_fans_out(self):
         class Client:
             def __init__(self, files):
                 self.files = files
@@ -138,11 +139,15 @@ class DownloaderTests(unittest.TestCase):
         bf01 = "/reports/11 BF-01 BUNKER 2026-27.xlsx"
         self.assertEqual(client.lists, ["/QC_LAB_DATA"])
         self.assertEqual(client.downloads.count(bf02), 1)
-        self.assertNotIn(bf01, client.downloads)
+        self.assertEqual(client.downloads.count(bf01), 1)
         self.assertEqual(
             set(result.by_mode), {"rm", "fines_analysis", "dust"}
         )
         self.assertIn("12 BF-02 BUNKER 2026-27.xlsx", result.by_mode["rm"].paths[0])
+        self.assertEqual(len(result.by_mode["rm"].paths), 2)
+        self.assertTrue(
+            any("11 BF-01 BUNKER 2026-27.xlsx" in path for path in result.by_mode["rm"].paths)
+        )
 
     def test_charge_uses_nested_api_folder_and_today_name(self):
         expected_folder = self._config().charge_folder_path

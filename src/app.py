@@ -31,6 +31,7 @@ BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
 RM_STOCK_BULK_PATTERNS = ("RM BULK STOCK*",)
 RM_STOCK_SINTER_PATTERNS = ("*DPR SP#2*.xls*",)
 BF02_BUNKER_PATTERNS = ("*BF-02*BUNKER*.xls*",)
+BF01_BUNKER_PATTERNS = ("*BF-01*BUNKER*.xls*",)
 DUST_BASIC_PATTERNS = BF02_BUNKER_PATTERNS
 DUST_CHEMICAL_PATTERNS = (
     "*GCP DUST CATCHER ESP GRATE BAR SAMPLE ANALYSIS*.xlsx",
@@ -220,7 +221,7 @@ def _rm_source_files(
     download_dir: Path,
     download_result: DownloadResult | None,
     logger,
-) -> Path | None:
+) -> tuple[Path | None, Path | None]:
     downloaded = [] if skip_download else _downloaded_files_for_mode(
         "rm", download_result, logger
     )
@@ -230,9 +231,11 @@ def _rm_source_files(
         else _latest_matching_file(downloaded, patterns)
     )
     rm_file = resolver(BF02_BUNKER_PATTERNS)
-    log = logger.info if rm_file else logger.warning
-    log(f"rm: BF-02 RM source file: {rm_file or 'not found'}")
-    return rm_file
+    sinter_file = resolver(BF01_BUNKER_PATTERNS)
+    for label, path in (("BF-02 RM", rm_file), ("BF-01 Sinter", sinter_file)):
+        log = logger.info if path else logger.warning
+        log(f"rm: {label} source file: {path or 'not found'}")
+    return rm_file, sinter_file
 
 
 def _rm_strength_source_files(
@@ -503,17 +506,18 @@ def run_processing(
     download_dir = Path(cfg["download"]["download_dir"]).expanduser()
 
     if "rm" in modes:
-        rm_file = _rm_source_files(
+        rm_file, sinter_file = _rm_source_files(
             skip_download=skip_download,
             download_dir=download_dir,
             download_result=download_result,
             logger=logger,
         )
-        if rm_file:
+        if rm_file or sinter_file:
             RMService(logger).process(
-                str(rm_file),
+                str(rm_file) if rm_file else None,
                 cfg,
                 run_dates,
+                sinter_file=str(sinter_file) if sinter_file else None,
             )
 
     if "fines_analysis" in modes:

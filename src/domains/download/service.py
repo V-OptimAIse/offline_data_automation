@@ -165,7 +165,7 @@ def _combine_download_outcomes(parts: list[DownloadOutcome]) -> DownloadOutcome:
 
 
 MODE_SOURCE_KEYS: dict[str, tuple[str, ...]] = {
-    "rm": ("rm",),
+    "rm": ("rm", "rm_sinter"),
     "fines_analysis": ("rm",),
     "dpr": ("dpr",),
     "hot_metal": ("hot_metal",),
