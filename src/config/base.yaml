@@ -25,7 +25,7 @@ availability:
     rm:
       tables:
         - {table: offline_feed.fuel_chemistry, label: "RM - Fuel", window_hours: 8, due_hours: [0, 8, 16]}
-        - {table: offline_feed.sinter_chemistry, label: "RM - Sinter", window_hours: 4, due_hours: [0, 4, 8, 12, 16, 20]}
+        - {table: offline_feed.sinter_chemistry, label: "RM - Sinter", window_hours: 6, due_hours: [0, 4, 8, 12, 16, 20]}
   mail:
     smtp_host: ${SMTP_HOST}
     smtp_port: ${SMTP_PORT}
