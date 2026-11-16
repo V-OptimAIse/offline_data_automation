@@ -15,6 +15,10 @@ write_db: [pi_db, neon_db]
 
 availability:
   timezone: Asia/Kolkata
+  state_path: output/state/availability_state.json
+  shutdown_detection:
+    missing_charge_checks: 4
+    recovery_charge_checks: 2
   checks:
     charge:
       tables:
@@ -86,4 +90,3 @@ influxdb:
   token: ${INFLUX_TOKEN}       
   online_token: ${INFLUX_ONLINE_TOKEN}
   timestamp_col: date
-

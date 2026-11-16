@@ -180,6 +180,8 @@ The `OnFailure` entries use the existing `offline-data-automation-failure@.servi
 
 `src/availability.py` checks every configured PostgreSQL target in `write_db` for recent charge, hot-metal, and RM data. Windows are calculated in Asia/Kolkata and queried as inclusive UTC ranges. Missing data and database errors are combined into one STARTTLS email per run; successful runs send no mail.
 
+The scheduled checker also tracks furnace activity in `output/state/availability_state.json`. Four consecutive hourly charge checks with no data switch it to `SHUTDOWN` and send one shutdown-confirmation email. While shutdown remains active, charge monitoring continues silently and all routine charge, hot-metal, and RM availability alerts are suppressed. Four consecutive hourly charge checks with data return it to `NORMAL` and resume the other due checks. Database errors do not count toward either streak. Manual `--mode` commands bypass this automatic gating, and `--dry-run` never changes the saved state or sends mail. Both thresholds and the state path are configurable under `availability` in `src/config/base.yaml`.
+
 Add the SMTP values from `.env.example` to the private `.env` file. `ALERT_MAIL_TO` accepts comma-separated recipients. Test checks without sending mail:
 
 ```bash

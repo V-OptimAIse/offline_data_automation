@@ -14,6 +14,13 @@ from domains.availability.checker import (
     checks_due,
     modes_due,
 )
+from domains.availability.furnace_state import (
+    advance_furnace_state,
+    classify_charge_results,
+    load_furnace_state,
+    mark_shutdown_notified,
+    save_furnace_state,
+)
 from infrastructure.database_targets import iter_database_targets
 from infrastructure.mailer import send_mail
 
@@ -153,6 +160,77 @@ def _alert_message(
     return subject, "\n".join(body_lines)
 
 
+def _shutdown_confirmation_message(
+    *,
+    now: datetime,
+    missing_threshold: int,
+    recovery_threshold: int,
+    tz: ZoneInfo,
+) -> tuple[str, str]:
+    subject = "[BF2 Offline Data] Blast furnace shutdown confirmed"
+    body = "\n".join(
+        [
+            "BF2 Blast Furnace Status",
+            "",
+            "Status: SHUTDOWN CONFIRMED",
+            f"Confirmed at: {_format_email_datetime(now, tz)}",
+            (
+                "Reason: Charge data was unavailable for "
+                f"{missing_threshold} consecutive hourly checks."
+            ),
+            "",
+            "Routine availability alerts are now paused for:",
+            "- Charge",
+            "- Hot Metal",
+            "- RM Fuel",
+            "- RM Sinter",
+            "",
+            "Charge monitoring will continue silently every hour.",
+            (
+                "Normal checks will resume after "
+                f"{recovery_threshold} consecutive charge checks with data."
+            ),
+        ]
+    )
+    return subject, body
+
+
+def _log_results(
+    results: Sequence[AvailabilityResult],
+    *,
+    tz: ZoneInfo,
+    logger: logging.Logger,
+) -> None:
+    for result in results:
+        log = logger.info if result.status == "OK" else logger.warning
+        log(_result_line(result, tz))
+
+
+def _finish_run(
+    cfg: dict[str, Any],
+    results: Sequence[AvailabilityResult],
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    availability_cfg = cfg.get("availability") or {}
+    tz = ZoneInfo(str(availability_cfg.get("timezone") or "UTC"))
+    _log_results(results, tz=tz, logger=logger)
+
+    failures = [result for result in results if result.status in {"MISSING", "ERROR"}]
+    if not failures:
+        logger.info("All requested data availability checks passed; no mail sent")
+        return 0
+    if dry_run:
+        logger.info("Dry run: alert mail suppressed | failures=%d", len(failures))
+        return 0
+
+    subject, body = _alert_message(results, tz)
+    send_mail(availability_cfg.get("mail") or {}, subject, body)
+    logger.info("Availability alert mail sent | failures=%d", len(failures))
+    return 0
+
+
 def run(
     cfg: dict[str, Any],
     *,
@@ -162,8 +240,6 @@ def run(
     logger: logging.Logger,
     tables_by_mode: dict[str, list[str]] | None = None,
 ) -> int:
-    availability_cfg = cfg.get("availability") or {}
-    tz = ZoneInfo(str(availability_cfg.get("timezone") or "UTC"))
     if not modes:
         logger.info("No availability modes are due at this hour")
         return 0
@@ -185,23 +261,113 @@ def run(
         now,
         tables_by_mode=tables_by_mode,
     )
-    for result in results:
-        log = logger.info if result.status == "OK" else logger.warning
-        log(_result_line(result, tz))
+    return _finish_run(cfg, results, dry_run=dry_run, logger=logger)
 
-    failures = [result for result in results if result.status in {"MISSING", "ERROR"}]
-    if not failures:
-        logger.info("All requested data availability checks passed; no mail sent")
+
+def run_scheduled(
+    cfg: dict[str, Any],
+    *,
+    now: datetime,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """Run due checks with furnace shutdown detection and recovery gating."""
+    availability_cfg = cfg.get("availability") or {}
+    due_tables = checks_due(cfg, now)
+    charge_tables = due_tables.get("charge") or []
+    if not charge_tables:
+        raise RuntimeError("Scheduled availability checks require a due charge check")
+
+    targets = iter_database_targets(cfg)
+    if not targets:
+        raise RuntimeError("No configured PostgreSQL write targets are available to check")
+
+    charge_results = check_availability(
+        cfg,
+        targets,
+        ["charge"],
+        now,
+        tables_by_mode={"charge": charge_tables},
+    )
+    observation = classify_charge_results(charge_results)
+    state_path = availability_cfg.get(
+        "state_path", "output/state/availability_state.json"
+    )
+    detection_cfg = availability_cfg.get("shutdown_detection") or {}
+    missing_threshold = int(detection_cfg.get("missing_charge_checks", 4))
+    recovery_threshold = int(detection_cfg.get("recovery_charge_checks", 4))
+    previous_state = load_furnace_state(state_path)
+    current_state = advance_furnace_state(
+        previous_state,
+        observation,
+        missing_threshold=missing_threshold,
+        recovery_threshold=recovery_threshold,
+        now=now,
+    )
+
+    logger.info(
+        "Furnace availability state | previous=%s | current=%s | "
+        "charge_observation=%s | missing_streak=%d | recovery_streak=%d | "
+        "persisted=%s",
+        previous_state.status,
+        current_state.status,
+        observation,
+        current_state.consecutive_missing,
+        current_state.consecutive_available,
+        not dry_run,
+    )
+
+    results = list(charge_results)
+    non_charge_tables = {
+        mode: tables for mode, tables in due_tables.items() if mode != "charge"
+    }
+    if current_state.status == "SHUTDOWN":
+        if non_charge_tables:
+            logger.warning(
+                "Furnace shutdown state active; suppressing scheduled checks | modes=%s",
+                ",".join(non_charge_tables),
+            )
+    elif non_charge_tables:
+        non_charge_results = check_availability(
+            cfg,
+            targets,
+            list(non_charge_tables),
+            now,
+            tables_by_mode=non_charge_tables,
+        )
+        results.extend(non_charge_results)
+
+    if current_state.status == "SHUTDOWN":
+        tz = ZoneInfo(str(availability_cfg.get("timezone") or "UTC"))
+        _log_results(results, tz=tz, logger=logger)
+        if dry_run:
+            if not current_state.shutdown_notified:
+                logger.info("Dry run: shutdown confirmation mail suppressed")
+            logger.info("Dry run: furnace state was not persisted")
+            return 0
+
+        save_furnace_state(state_path, current_state)
+        if not current_state.shutdown_notified:
+            subject, body = _shutdown_confirmation_message(
+                now=now,
+                missing_threshold=missing_threshold,
+                recovery_threshold=recovery_threshold,
+                tz=tz,
+            )
+            send_mail(availability_cfg.get("mail") or {}, subject, body)
+            current_state = mark_shutdown_notified(current_state)
+            save_furnace_state(state_path, current_state)
+            logger.info("Blast furnace shutdown confirmation mail sent")
+        else:
+            logger.info(
+                "Furnace shutdown state active; all routine availability alerts suppressed"
+            )
         return 0
 
-    if dry_run:
-        logger.info("Dry run: alert mail suppressed | failures=%d", len(failures))
-        return 0
+    if not dry_run:
+        save_furnace_state(state_path, current_state)
 
-    subject, body = _alert_message(results, tz)
-    send_mail(availability_cfg.get("mail") or {}, subject, body)
-    logger.info("Availability alert mail sent | failures=%d", len(failures))
-    return 0
+    return _finish_run(cfg, results, dry_run=dry_run, logger=logger)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -216,15 +382,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         availability_cfg = cfg.get("availability") or {}
         tz = ZoneInfo(str(availability_cfg.get("timezone") or "UTC"))
         now = datetime.now(tz)
+        if args.mode is None:
+            return run_scheduled(
+                cfg,
+                now=now,
+                dry_run=args.dry_run,
+                logger=logger,
+            )
         modes = _requested_modes(args.mode, cfg, now)
-        tables_by_mode = None if args.mode is not None else _due_tables(cfg, now)
         return run(
             cfg,
             modes=modes,
             now=now,
             dry_run=args.dry_run,
             logger=logger,
-            tables_by_mode=tables_by_mode,
         )
     except Exception as exc:
         logging.getLogger("availability").exception("Availability checker failed: %s", exc)

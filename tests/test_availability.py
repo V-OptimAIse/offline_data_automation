@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from copy import deepcopy
 import logging
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 
@@ -17,6 +19,13 @@ from domains.availability.checker import (
     check_availability,
     checks_due,
     modes_due,
+)
+from domains.availability.furnace_state import (
+    FurnaceState,
+    advance_furnace_state,
+    classify_charge_results,
+    load_furnace_state,
+    save_furnace_state,
 )
 from infrastructure.database_targets import DatabaseTarget
 from infrastructure.mailer import send_mail
@@ -299,6 +308,283 @@ class AvailabilityCliTests(unittest.TestCase):
         self.assertIn("- NeonDB developer: No data", body)
         self.assertIn("16-11-2026 07:30 IST", body)
         self.assertNotIn("status=MISSING", body)
+
+
+class FurnaceStateTests(unittest.TestCase):
+    def _state_path(self):
+        path = Path.cwd() / f"test_availability_state_{uuid4().hex}.json"
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    @staticmethod
+    def _charge_result(status, target="PI_DB"):
+        return AvailabilityResult(
+            mode="charge",
+            target_label=target,
+            table="offline_feed.charge_data",
+            window_start=datetime(2026, 11, 16, 0, 0, tzinfo=timezone.utc),
+            window_end=datetime(2026, 11, 16, 1, 5, tzinfo=timezone.utc),
+            row_count=1 if status == "OK" else 0 if status == "MISSING" else None,
+            latest_date_time=None,
+            status=status,
+            check_label="Charge",
+            window_hours=1,
+        )
+
+    def test_four_missing_checks_enter_shutdown_and_four_available_checks_recover(self):
+        state = FurnaceState()
+        now = datetime(2026, 11, 16, 1, 5, tzinfo=IST)
+        for _ in range(3):
+            state = advance_furnace_state(
+                state,
+                "MISSING",
+                missing_threshold=4,
+                recovery_threshold=4,
+                now=now,
+            )
+            self.assertEqual(state.status, "NORMAL")
+        state = advance_furnace_state(
+            state,
+            "MISSING",
+            missing_threshold=4,
+            recovery_threshold=4,
+            now=now,
+        )
+        self.assertEqual(state.status, "SHUTDOWN")
+
+        for _ in range(3):
+            state = advance_furnace_state(
+                state,
+                "AVAILABLE",
+                missing_threshold=4,
+                recovery_threshold=4,
+                now=now,
+            )
+            self.assertEqual(state.status, "SHUTDOWN")
+        state = advance_furnace_state(
+            state,
+            "AVAILABLE",
+            missing_threshold=4,
+            recovery_threshold=4,
+            now=now,
+        )
+        self.assertEqual(state.status, "NORMAL")
+
+    def test_database_error_does_not_count_as_missing_or_available(self):
+        results = [
+            self._charge_result("ERROR", "PI_DB"),
+            self._charge_result("ERROR", "NeonDB developer"),
+        ]
+        self.assertEqual(classify_charge_results(results), "UNKNOWN")
+
+        state = advance_furnace_state(
+            FurnaceState(consecutive_missing=3),
+            "UNKNOWN",
+            missing_threshold=4,
+            recovery_threshold=4,
+            now=datetime(2026, 11, 16, 4, 5, tzinfo=IST),
+        )
+        self.assertEqual(state.status, "NORMAL")
+        self.assertEqual(state.consecutive_missing, 0)
+
+    def test_charge_in_either_database_means_furnace_is_available(self):
+        results = [
+            self._charge_result("MISSING", "PI_DB"),
+            self._charge_result("OK", "NeonDB developer"),
+        ]
+        self.assertEqual(classify_charge_results(results), "AVAILABLE")
+
+    def test_state_is_saved_and_loaded(self):
+        path = self._state_path()
+        expected = FurnaceState(
+            status="SHUTDOWN",
+            consecutive_missing=4,
+            last_observation="MISSING",
+            updated_at="2026-11-16T04:05:00+05:30",
+        )
+        save_furnace_state(path, expected)
+        self.assertEqual(load_furnace_state(path), expected)
+
+    @patch.object(availability, "send_mail")
+    @patch.object(availability, "check_availability")
+    @patch.object(availability, "iter_database_targets")
+    def test_fourth_missing_check_suppresses_due_rm_immediately(
+        self, target_iterator, check, mail
+    ):
+        target_iterator.return_value = [
+            DatabaseTarget("pi_db", "PI_DB", {"url": "postgres://pi"})
+        ]
+        check.return_value = [self._charge_result("MISSING")]
+        cfg = deepcopy(CFG)
+        cfg["availability"]["state_path"] = str(self._state_path())
+        cfg["availability"]["shutdown_detection"] = {
+            "missing_charge_checks": 4,
+            "recovery_charge_checks": 4,
+        }
+        save_furnace_state(
+            cfg["availability"]["state_path"],
+            FurnaceState(consecutive_missing=3),
+        )
+
+        code = availability.run_scheduled(
+            cfg,
+            now=datetime(2026, 11, 16, 4, 5, tzinfo=IST),
+            dry_run=True,
+            logger=logging.getLogger("test-fourth-missing"),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(check.call_count, 1)
+        mail.assert_not_called()
+        self.assertEqual(
+            load_furnace_state(cfg["availability"]["state_path"]).status,
+            "NORMAL",
+        )
+
+    @patch.object(availability, "send_mail")
+    @patch.object(availability, "check_availability")
+    @patch.object(availability, "iter_database_targets")
+    def test_shutdown_mail_is_sent_once_then_routine_alerts_are_suppressed(
+        self, target_iterator, check, mail
+    ):
+        target_iterator.return_value = [
+            DatabaseTarget("pi_db", "PI_DB", {"url": "postgres://pi"})
+        ]
+        check.return_value = [self._charge_result("MISSING")]
+        cfg = deepcopy(CFG)
+        cfg["availability"]["state_path"] = str(self._state_path())
+        cfg["availability"]["shutdown_detection"] = {
+            "missing_charge_checks": 4,
+            "recovery_charge_checks": 4,
+        }
+        save_furnace_state(
+            cfg["availability"]["state_path"],
+            FurnaceState(consecutive_missing=3),
+        )
+
+        availability.run_scheduled(
+            cfg,
+            now=datetime(2026, 11, 16, 4, 5, tzinfo=IST),
+            dry_run=False,
+            logger=logging.getLogger("test-shutdown-mail"),
+        )
+
+        mail.assert_called_once()
+        subject, body = mail.call_args.args[1:]
+        self.assertEqual(
+            subject,
+            "[BF2 Offline Data] Blast furnace shutdown confirmed",
+        )
+        self.assertIn("Status: SHUTDOWN CONFIRMED", body)
+        state = load_furnace_state(cfg["availability"]["state_path"])
+        self.assertEqual(state.status, "SHUTDOWN")
+        self.assertTrue(state.shutdown_notified)
+
+        mail.reset_mock()
+        availability.run_scheduled(
+            cfg,
+            now=datetime(2026, 11, 16, 5, 5, tzinfo=IST),
+            dry_run=False,
+            logger=logging.getLogger("test-shutdown-silent"),
+        )
+        mail.assert_not_called()
+
+    @patch.object(availability, "send_mail")
+    @patch.object(availability, "check_availability")
+    @patch.object(availability, "iter_database_targets")
+    def test_failed_shutdown_mail_is_retried_on_next_run(
+        self, target_iterator, check, mail
+    ):
+        target_iterator.return_value = [
+            DatabaseTarget("pi_db", "PI_DB", {"url": "postgres://pi"})
+        ]
+        check.return_value = [self._charge_result("MISSING")]
+        mail.side_effect = OSError("SMTP unavailable")
+        cfg = deepcopy(CFG)
+        cfg["availability"]["state_path"] = str(self._state_path())
+        cfg["availability"]["shutdown_detection"] = {
+            "missing_charge_checks": 4,
+            "recovery_charge_checks": 4,
+        }
+        save_furnace_state(
+            cfg["availability"]["state_path"],
+            FurnaceState(consecutive_missing=3),
+        )
+
+        with self.assertRaises(OSError):
+            availability.run_scheduled(
+                cfg,
+                now=datetime(2026, 11, 16, 4, 5, tzinfo=IST),
+                dry_run=False,
+                logger=logging.getLogger("test-shutdown-mail-failure"),
+            )
+        self.assertFalse(
+            load_furnace_state(
+                cfg["availability"]["state_path"]
+            ).shutdown_notified
+        )
+
+        mail.side_effect = None
+        mail.reset_mock()
+        availability.run_scheduled(
+            cfg,
+            now=datetime(2026, 11, 16, 5, 5, tzinfo=IST),
+            dry_run=False,
+            logger=logging.getLogger("test-shutdown-mail-retry"),
+        )
+        mail.assert_called_once()
+        self.assertTrue(
+            load_furnace_state(
+                cfg["availability"]["state_path"]
+            ).shutdown_notified
+        )
+
+    @patch.object(availability, "send_mail")
+    @patch.object(availability, "check_availability")
+    @patch.object(availability, "iter_database_targets")
+    def test_fourth_recovery_check_resumes_due_rm_immediately(
+        self, target_iterator, check, _mail
+    ):
+        target_iterator.return_value = [
+            DatabaseTarget("pi_db", "PI_DB", {"url": "postgres://pi"})
+        ]
+        check.side_effect = [
+            [self._charge_result("OK")],
+            [
+                AvailabilityResult(
+                    mode="rm",
+                    target_label="PI_DB",
+                    table="offline_feed.fuel_chemistry",
+                    window_start=datetime(2026, 11, 15, 18, 30, tzinfo=timezone.utc),
+                    window_end=datetime(2026, 11, 16, 2, 35, tzinfo=timezone.utc),
+                    row_count=1,
+                    latest_date_time=None,
+                    status="OK",
+                    check_label="RM - Fuel",
+                    window_hours=8,
+                )
+            ],
+        ]
+        cfg = deepcopy(CFG)
+        cfg["availability"]["state_path"] = str(self._state_path())
+        cfg["availability"]["shutdown_detection"] = {
+            "missing_charge_checks": 4,
+            "recovery_charge_checks": 4,
+        }
+        save_furnace_state(
+            cfg["availability"]["state_path"],
+            FurnaceState(status="SHUTDOWN", consecutive_available=3),
+        )
+
+        code = availability.run_scheduled(
+            cfg,
+            now=datetime(2026, 11, 16, 8, 5, tzinfo=IST),
+            dry_run=True,
+            logger=logging.getLogger("test-fourth-recovery"),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(check.call_count, 2)
 
 
 class MailerTests(unittest.TestCase):
