@@ -176,6 +176,28 @@ sudo journalctl -u offline-data-weekly-backfill.service -n 100 --no-pager
 
 The `OnFailure` entries use the existing `offline-data-automation-failure@.service` mail handler. Both scheduled services append uncaught errors to `/home/voptimaise/Desktop/evonith/dataloading/offline_data/offline_data_automation/logs/offline-data-error.log`, so update the old mail handler to tail that path. If the failure handler is not installed, remove the `OnFailure` lines.
 
+## Availability checks
+
+`src/availability.py` checks every configured PostgreSQL target in `write_db` for recent charge, hot-metal, and RM data. Windows are calculated in Asia/Kolkata and queried as inclusive UTC ranges. Missing data and database errors are combined into one STARTTLS email per run; successful runs send no mail.
+
+Add the SMTP values from `.env.example` to the private `.env` file. `ALERT_MAIL_TO` accepts comma-separated recipients. Test checks without sending mail:
+
+```bash
+.venv/bin/python src/availability.py --mode charge,rm,hot_metal --dry-run
+```
+
+Install the single hourly service and timer. The service is read-only and intentionally does not use `.scheduled-jobs.lock`:
+
+```bash
+sudo install -m 0644 deployment/offline-data-availability.service.example /etc/systemd/system/offline-data-availability.service
+sudo install -m 0644 deployment/offline-data-availability.timer.example /etc/systemd/system/offline-data-availability.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now offline-data-availability.timer
+sudo systemctl status offline-data-availability.timer
+```
+
+The timer runs at `:05` every hour. With no `--mode`, the script selects only tables due at that IST hour: charge every hour; hot metal at 03:05, 07:05, 11:05, 15:05, 19:05, and 23:05; RM fuel at 00:05, 08:05, and 16:05; and RM sinter at 00:05, 04:05, 08:05, 12:05, 16:05, and 20:05. A manual `--mode` list runs every table belonging to those modes immediately regardless of due hours.
+
 ## Supported modes
 
 The existing business processing remains available for `rm`, `fines_analysis` (`fines` alias), `dpr`, `hot_metal`, `rm_strength`, `rm_stock`, `charge`, `dust`, and `ash`. Domain sheet mappings remain in `src/config/*.yaml`; this API change does not alter database schemas or transformations.

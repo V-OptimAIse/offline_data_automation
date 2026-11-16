@@ -1,0 +1,11 @@
+[Unit]
+Description=Check offline data availability at five minutes past every hour
+
+[Timer]
+OnCalendar=*-*-* *:05:00 Asia/Kolkata
+Persistent=true
+AccuracySec=1min
+Unit=offline-data-availability.service
+
+[Install]
+WantedBy=timers.target

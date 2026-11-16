@@ -1,0 +1,1 @@
+"""Data availability checking domain."""

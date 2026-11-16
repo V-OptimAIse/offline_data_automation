@@ -13,6 +13,28 @@ logging:
 #   write_db: [neon_db, influx_db, pi_db]
 write_db: [pi_db, neon_db]
 
+availability:
+  timezone: Asia/Kolkata
+  checks:
+    charge:
+      tables:
+        - {table: offline_feed.charge_data, window_hours: 1, due_hours: "all"}
+    hot_metal:
+      tables:
+        - {table: offline_feed.hot_metal_slag_analysis, window_hours: 4, due_hours: [3, 7, 11, 15, 19, 23]}
+    rm:
+      tables:
+        - {table: offline_feed.fuel_chemistry, window_hours: 8, due_hours: [0, 8, 16]}
+        - {table: offline_feed.sinter_chemistry, window_hours: 4, due_hours: [0, 4, 8, 12, 16, 20]}
+  mail:
+    smtp_host: ${SMTP_HOST}
+    smtp_port: ${SMTP_PORT}
+    user: ${SMTP_USER}
+    password: ${SMTP_PASSWORD}
+    from_name: "Data Availability - Evonith"
+    from: ${ALERT_MAIL_FROM}
+    to: ${ALERT_MAIL_TO}
+
 
 eml:
   base_url: "https://ithelpdesk-ugml.sg4.quickconnect.to"
