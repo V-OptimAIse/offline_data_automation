@@ -76,17 +76,80 @@ def _result_line(result: AvailabilityResult, tz: ZoneInfo) -> str:
     return line
 
 
+def _format_email_datetime(value: datetime | None, tz: ZoneInfo) -> str:
+    if value is None:
+        return "No earlier data found"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("UTC"))
+    return value.astimezone(tz).strftime("%d-%m-%Y %H:%M IST")
+
+
+def _email_status(result: AvailabilityResult) -> str:
+    if result.status == "OK":
+        return f"Available ({result.row_count} rows)"
+    if result.status == "MISSING":
+        return "No data"
+    return f"Check failed ({result.error or 'unknown error'})"
+
+
 def _alert_message(
-    failures: Sequence[AvailabilityResult], tz: ZoneInfo
+    results: Sequence[AvailabilityResult], tz: ZoneInfo
 ) -> tuple[str, str]:
-    pairs = list(dict.fromkeys((result.mode, result.target_label) for result in failures))
-    summary = ", ".join(f"{mode} ({label})" for mode, label in pairs)
-    subject = f"[BF2 Offline Data] Data NOT available: {summary}"
+    grouped: dict[tuple[str, str], list[AvailabilityResult]] = {}
+    for result in results:
+        grouped.setdefault((result.mode, result.table), []).append(result)
+    affected = [
+        group
+        for group in grouped.values()
+        if any(result.status in {"MISSING", "ERROR"} for result in group)
+    ]
+    labels = list(
+        dict.fromkeys(
+            (group[0].check_label or group[0].mode.replace("_", " ").title())
+            for group in affected
+        )
+    )
+    subject = f"[BF2 Offline Data] Availability alert: {', '.join(labels)}"
     body_lines = [
-        "Recent offline data is missing or could not be checked:",
+        "BF2 Offline Data Availability Alert",
         "",
     ]
-    body_lines.extend(_result_line(result, tz) for result in failures)
+    for index, group in enumerate(affected):
+        first = group[0]
+        label = first.check_label or first.mode.replace("_", " ").title()
+        hours = first.window_hours
+        interval = f"Last {hours} hour" + ("" if hours == 1 else "s")
+        body_lines.extend(
+            [
+                label,
+                f"Expected interval: {interval}",
+                (
+                    "Checked window: "
+                    f"{_format_email_datetime(first.window_start, tz)} to "
+                    f"{_format_email_datetime(first.window_end, tz)}"
+                ),
+                "",
+                "Database status:",
+            ]
+        )
+        body_lines.extend(
+            f"- {result.target_label}: {_email_status(result)}"
+            for result in group
+        )
+        body_lines.extend(["", "Latest available value:"])
+        body_lines.extend(
+            f"- {result.target_label}: "
+            f"{_format_email_datetime(result.latest_date_time, tz)}"
+            for result in group
+        )
+        if index < len(affected) - 1:
+            body_lines.extend(["", "----------------------------------------", ""])
+    body_lines.extend(
+        [
+            "",
+            "This is an automated alert from Data Availability - Evonith.",
+        ]
+    )
     return subject, "\n".join(body_lines)
 
 
@@ -135,7 +198,7 @@ def run(
         logger.info("Dry run: alert mail suppressed | failures=%d", len(failures))
         return 0
 
-    subject, body = _alert_message(failures, tz)
+    subject, body = _alert_message(results, tz)
     send_mail(availability_cfg.get("mail") or {}, subject, body)
     logger.info("Availability alert mail sent | failures=%d", len(failures))
     return 0

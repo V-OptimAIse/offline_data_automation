@@ -18,20 +18,20 @@ availability:
   checks:
     charge:
       tables:
-        - {table: offline_feed.charge_data, window_hours: 1, due_hours: "all"}
+        - {table: offline_feed.charge_data, label: Charge, window_hours: 1, due_hours: "all"}
     hot_metal:
       tables:
-        - {table: offline_feed.hot_metal_slag_analysis, window_hours: 4, due_hours: [3, 7, 11, 15, 19, 23]}
+        - {table: offline_feed.hot_metal_slag_analysis, label: Hot Metal, window_hours: 4, due_hours: [3, 7, 11, 15, 19, 23]}
     rm:
       tables:
-        - {table: offline_feed.fuel_chemistry, window_hours: 8, due_hours: [0, 8, 16]}
-        - {table: offline_feed.sinter_chemistry, window_hours: 4, due_hours: [0, 4, 8, 12, 16, 20]}
+        - {table: offline_feed.fuel_chemistry, label: "RM - Fuel", window_hours: 8, due_hours: [0, 8, 16]}
+        - {table: offline_feed.sinter_chemistry, label: "RM - Sinter", window_hours: 4, due_hours: [0, 4, 8, 12, 16, 20]}
   mail:
     smtp_host: ${SMTP_HOST}
     smtp_port: ${SMTP_PORT}
     user: ${SMTP_USER}
     password: ${SMTP_PASSWORD}
-    from_name: "Data Availability - Evonith"
+    from_name: "Offline Data - Evonith"
     from: ${ALERT_MAIL_FROM}
     to: ${ALERT_MAIL_TO}
 

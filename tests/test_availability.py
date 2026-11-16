@@ -31,6 +31,7 @@ CFG = {
                 "tables": [
                     {
                         "table": "offline_feed.charge_data",
+                        "label": "Charge",
                         "window_hours": 1,
                         "due_hours": "all",
                     }
@@ -40,6 +41,7 @@ CFG = {
                 "tables": [
                     {
                         "table": "offline_feed.hot_metal_slag_analysis",
+                        "label": "Hot Metal",
                         "window_hours": 4,
                         "due_hours": [3, 7, 11, 15, 19, 23],
                     }
@@ -49,11 +51,13 @@ CFG = {
                 "tables": [
                     {
                         "table": "offline_feed.fuel_chemistry",
+                        "label": "RM - Fuel",
                         "window_hours": 8,
                         "due_hours": [0, 8, 16],
                     },
                     {
                         "table": "offline_feed.sinter_chemistry",
+                        "label": "RM - Sinter",
                         "window_hours": 4,
                         "due_hours": [0, 4, 8, 12, 16, 20],
                     },
@@ -155,6 +159,8 @@ class AvailabilityCheckerTests(unittest.TestCase):
         self.assertEqual(client.calls[0][1][0], fuel_start)
         self.assertEqual(client.calls[1][1][0], sinter_start)
         self.assertIn("date_time >= %s", client.calls[0][0])
+        self.assertIn("SELECT MAX(date_time)", client.calls[0][0])
+        self.assertEqual(client.calls[0][1][1], client.calls[0][1][2])
 
     def test_due_table_filter_runs_only_sinter_at_0405(self):
         client = FakeClient([(2, None), (2, None)])
@@ -261,6 +267,38 @@ class AvailabilityCliTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         mail.assert_not_called()
+
+    def test_alert_email_groups_databases_in_a_readable_format(self):
+        window_start = datetime(2026, 11, 16, 2, 30, tzinfo=timezone.utc)
+        window_end = datetime(2026, 11, 16, 6, 49, tzinfo=timezone.utc)
+        latest = datetime(2026, 11, 16, 2, 0, tzinfo=timezone.utc)
+        results = [
+            AvailabilityResult(
+                mode="rm",
+                target_label=target,
+                table="offline_feed.sinter_chemistry",
+                window_start=window_start,
+                window_end=window_end,
+                row_count=0,
+                latest_date_time=latest,
+                status="MISSING",
+                check_label="RM - Sinter",
+                window_hours=4,
+            )
+            for target in ("PI_DB", "NeonDB developer")
+        ]
+
+        subject, body = availability._alert_message(results, IST)
+
+        self.assertEqual(
+            subject,
+            "[BF2 Offline Data] Availability alert: RM - Sinter",
+        )
+        self.assertIn("Expected interval: Last 4 hours", body)
+        self.assertIn("- PI_DB: No data", body)
+        self.assertIn("- NeonDB developer: No data", body)
+        self.assertIn("16-11-2026 07:30 IST", body)
+        self.assertNotIn("status=MISSING", body)
 
 
 class MailerTests(unittest.TestCase):

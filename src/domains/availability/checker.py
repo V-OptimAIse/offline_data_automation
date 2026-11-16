@@ -28,12 +28,15 @@ class AvailabilityResult:
     latest_date_time: datetime | None
     status: Status
     error: str | None = None
+    check_label: str | None = None
+    window_hours: int | None = None
 
 
 @dataclass(frozen=True)
 class CheckSpec:
     mode: str
     table: str
+    label: str
     window_hours: int
     due_hours: str | tuple[int, ...]
 
@@ -102,6 +105,8 @@ def check_availability(
                         start_utc,
                         end_utc,
                         exc,
+                        check_label=spec.label,
+                        window_hours=spec.window_hours,
                     )
                 )
             continue
@@ -123,6 +128,8 @@ def check_availability(
                             row_count=row_count,
                             latest_date_time=latest,
                             status="OK" if row_count > 0 else "MISSING",
+                            check_label=spec.label,
+                            window_hours=spec.window_hours,
                         )
                     )
                 except Exception as exc:
@@ -134,6 +141,8 @@ def check_availability(
                             start_utc,
                             end_utc,
                             exc,
+                            check_label=spec.label,
+                            window_hours=spec.window_hours,
                         )
                     )
         finally:
@@ -180,6 +189,7 @@ def _configured_check_specs(availability_cfg: dict[str, Any]) -> list[CheckSpec]
                 CheckSpec(
                     mode=mode,
                     table=table,
+                    label=str(table_cfg.get("label") or mode.replace("_", " ").title()),
                     window_hours=int(table_cfg["window_hours"]),
                     due_hours=due_hours,
                 )
@@ -207,12 +217,15 @@ def _query_table(
     start_utc: datetime,
     end_utc: datetime,
 ) -> tuple[int, datetime | None]:
+    table_sql = _quote_table(table)
     query = (
-        f"SELECT COUNT(*), MAX(date_time) FROM {_quote_table(table)} "
-        "WHERE date_time >= %s AND date_time <= %s"
+        "SELECT "
+        f"(SELECT COUNT(*) FROM {table_sql} "
+        "WHERE date_time >= %s AND date_time <= %s), "
+        f"(SELECT MAX(date_time) FROM {table_sql} WHERE date_time <= %s)"
     )
     with client.conn.cursor() as cursor:
-        cursor.execute(query, (start_utc, end_utc))
+        cursor.execute(query, (start_utc, end_utc, end_utc))
         row_count, latest = cursor.fetchone()
     return int(row_count), latest
 
@@ -224,6 +237,9 @@ def _error_result(
     start_utc: datetime,
     end_utc: datetime,
     exc: Exception,
+    *,
+    check_label: str,
+    window_hours: int,
 ) -> AvailabilityResult:
     return AvailabilityResult(
         mode=mode,
@@ -235,4 +251,6 @@ def _error_result(
         latest_date_time=None,
         status="ERROR",
         error=str(exc),
+        check_label=check_label,
+        window_hours=window_hours,
     )
