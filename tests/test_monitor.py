@@ -268,6 +268,46 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.processor.call_args_list[1].args[0], ["charge"])
         self.assertEqual(self.processor.call_args_list[1].args[1], ["10-Oct-2026"])
 
+    def test_missing_rm_strength_companion_does_not_block_charge(self):
+        charge_name = "CHARGE_AND_DUMP_REPORT_10_10_2026.xlsx"
+        self.p1.folders[P1] = [
+            remote("01 COKE OVEN 2026-27.xlsx", 100, 10, P1),
+        ]
+        self.p1.folders[CHARGE] = [remote(charge_name, 100, 10, CHARGE)]
+        self.monitor.run_cycle()
+
+        self.p1.folders[P1] = [
+            remote("01 COKE OVEN 2026-27.xlsx", 200, 10, P1),
+        ]
+        self.p1.folders[CHARGE] = [remote(charge_name, 200, 10, CHARGE)]
+
+        self.assertTrue(self.monitor.run_cycle())
+
+        self.processor.assert_called_once()
+        self.assertEqual(self.processor.call_args.args[0], ["charge"])
+        state = load_monitor_state(self.state_path)
+        self.assertEqual(state["sources"]["charge:2026-10-10"]["mtime"], 200)
+        self.assertEqual(state["sources"]["rm_strength_coke"]["mtime"], 100)
+
+    def test_non_charge_processing_failure_does_not_block_charge(self):
+        charge_name = "CHARGE_AND_DUMP_REPORT_10_10_2026.xlsx"
+        self.p1.folders[P1] = [remote("08 BF-02 DPR.xlsx", 100, 10, P1)]
+        self.p1.folders[CHARGE] = [remote(charge_name, 100, 10, CHARGE)]
+        self.monitor.run_cycle()
+
+        self.processor.side_effect = [RuntimeError("database unavailable"), None]
+        self.p1.folders[P1] = [remote("08 BF-02 DPR.xlsx", 200, 10, P1)]
+        self.p1.folders[CHARGE] = [remote(charge_name, 200, 10, CHARGE)]
+
+        self.assertTrue(self.monitor.run_cycle())
+
+        self.assertEqual(self.processor.call_count, 2)
+        self.assertEqual(self.processor.call_args_list[0].args[0], ["dpr"])
+        self.assertEqual(self.processor.call_args_list[1].args[0], ["charge"])
+        state = load_monitor_state(self.state_path)
+        self.assertEqual(state["sources"]["charge:2026-10-10"]["mtime"], 200)
+        self.assertEqual(state["sources"]["dpr"]["mtime"], 100)
+
     def test_ash_downloads_both_financial_year_files_when_window_crosses_april(self):
         boundary_now = datetime(2026, 4, 1, 12, 0, tzinfo=TZ)
         self.p1.folders[P1] = [

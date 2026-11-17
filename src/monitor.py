@@ -230,44 +230,70 @@ class SynologyMonitor:
         changed: dict[str, ResolvedSource],
         modes: list[str],
         state: dict,
-    ) -> DownloadResult:
+    ) -> tuple[DownloadResult, dict[str, str]]:
         dependencies = dependencies_for_modes(specs, modes)
         downloaded: dict[tuple[str, int | None, int | None], str] = {}
-        mode_paths: dict[str, list[str]] = {mode: [] for mode in modes}
+        mode_paths: dict[str, list[str]] = {}
+        failures: dict[str, str] = {}
         changed_ids = set(changed)
 
         for mode in modes:
-            for spec in dependencies.get(mode, ()):
-                source = resolved.get(spec.source_id)
-                if source is None:
-                    raise RuntimeError(
-                        f"Required companion source is unavailable: {spec.source_id}"
-                    )
-                previous = state["sources"].get(spec.source_id)
-                if (
-                    spec.source_id not in changed_ids
-                    and _source_changed(source, previous)
-                ):
-                    raise RuntimeError(
-                        f"Required companion source is not yet stable: {spec.source_id}"
-                    )
+            paths: list[str] = []
+            try:
+                for spec in dependencies.get(mode, ()):
+                    source = resolved.get(spec.source_id)
+                    if source is None:
+                        raise RuntimeError(
+                            "Required companion source is unavailable: "
+                            f"{spec.source_id}"
+                        )
+                    previous = state["sources"].get(spec.source_id)
+                    if (
+                        spec.source_id not in changed_ids
+                        and _source_changed(source, previous)
+                    ):
+                        raise RuntimeError(
+                            "Required companion source is not yet stable: "
+                            f"{spec.source_id}"
+                        )
 
-                fingerprint = source.fingerprint
-                if fingerprint in downloaded:
-                    path = downloaded[fingerprint]
-                elif spec.source_id not in changed_ids and self._local_matches(source):
-                    path = str(self._local_path(source).resolve())
-                else:
-                    path = self._download(source)
-                downloaded[fingerprint] = path
-                if path not in mode_paths[mode]:
-                    mode_paths[mode].append(path)
+                    fingerprint = source.fingerprint
+                    if fingerprint in downloaded:
+                        path = downloaded[fingerprint]
+                    elif (
+                        spec.source_id not in changed_ids
+                        and self._local_matches(source)
+                    ):
+                        path = str(self._local_path(source).resolve())
+                    else:
+                        path = self._download(source)
+                    downloaded[fingerprint] = path
+                    if path not in paths:
+                        paths.append(path)
+            except Exception as exc:
+                failures[mode] = str(exc)
+                self.logger.warning(
+                    "Mode preparation failed; other modes will continue | "
+                    "mode=%s | error=%s",
+                    mode,
+                    exc,
+                )
+                self.logger.debug(
+                    "Mode preparation failure details | mode=%s",
+                    mode,
+                    exc_info=True,
+                )
+                continue
+            mode_paths[mode] = paths
 
-        return DownloadResult(
-            by_mode={
-                mode: DownloadOutcome(status="downloaded", paths=tuple(paths))
-                for mode, paths in mode_paths.items()
-            }
+        return (
+            DownloadResult(
+                by_mode={
+                    mode: DownloadOutcome(status="downloaded", paths=tuple(paths))
+                    for mode, paths in mode_paths.items()
+                }
+            ),
+            failures,
         )
 
     def run_cycle(self) -> bool:
@@ -341,14 +367,16 @@ class SynologyMonitor:
             self.logger.info("Dry run; no files downloaded and no state committed")
             return True
 
-        result = self._prepare_download_result(
+        result, failures = self._prepare_download_result(
             specs,
             current_resolved,
             stable,
             modes,
             state,
         )
-        non_charge_modes = [mode for mode in modes if mode != "charge"]
+        prepared_modes = [mode for mode in modes if mode in result.by_mode]
+        successful_modes: set[str] = set()
+        non_charge_modes = [mode for mode in prepared_modes if mode != "charge"]
         if non_charge_modes:
             self.logger.info(
                 "Processing non-charge window | start=%s | end=%s | days=%d",
@@ -356,36 +384,85 @@ class SynologyMonitor:
                 run_dates[-1],
                 len(run_dates),
             )
-            self.processor(
-                non_charge_modes,
-                run_dates,
-                self.cfg,
-                self.logger,
-                result,
-                skip_download=False,
-            )
-        if "charge" in modes:
+            try:
+                self.processor(
+                    non_charge_modes,
+                    run_dates,
+                    self.cfg,
+                    self.logger,
+                    result,
+                    skip_download=False,
+                )
+            except Exception as exc:
+                for mode in non_charge_modes:
+                    failures[mode] = str(exc)
+                self.logger.warning(
+                    "Non-charge processing failed; charge will still continue | "
+                    "modes=%s | error=%s",
+                    ",".join(non_charge_modes),
+                    exc,
+                )
+                self.logger.debug(
+                    "Non-charge processing failure details", exc_info=True
+                )
+            else:
+                successful_modes.update(non_charge_modes)
+        if "charge" in prepared_modes:
             self.logger.info("Processing charge for today | date=%s", today_run_date)
-            self.processor(
-                ["charge"],
-                [today_run_date],
-                self.cfg,
-                self.logger,
-                result,
-                skip_download=False,
-            )
-        self.logger.info("Processing completed | sources=%s", ",".join(stable))
+            try:
+                self.processor(
+                    ["charge"],
+                    [today_run_date],
+                    self.cfg,
+                    self.logger,
+                    result,
+                    skip_download=False,
+                )
+            except Exception as exc:
+                failures["charge"] = str(exc)
+                self.logger.warning("Charge processing failed | error=%s", exc)
+                self.logger.debug("Charge processing failure details", exc_info=True)
+            else:
+                successful_modes.add("charge")
 
+        triggered_modes = set(modes)
+        committed: dict[str, ResolvedSource] = {}
         for source_id, source in stable.items():
+            source_modes = triggered_modes.intersection(source.spec.modes)
+            if source_modes and source_modes.issubset(successful_modes):
+                committed[source_id] = source
+
+        for source_id, source in committed.items():
             state["sources"][source_id] = source.state_entry()
-        save_monitor_state(self.state_path, state)
-        for source_id, source in stable.items():
+        if committed:
+            save_monitor_state(self.state_path, state)
+        for source_id, source in committed.items():
             self.logger.info(
                 "State committed | source=%s | mtime=%s | size=%s",
                 source_id,
                 source.remote.mtime,
                 source.remote.size,
             )
+
+        if failures:
+            failed_summary = "; ".join(
+                f"{mode}: {error}" for mode, error in failures.items()
+            )
+            if successful_modes:
+                self.logger.warning(
+                    "Monitor cycle partially completed | successful_modes=%s | "
+                    "failed_modes=%s",
+                    ",".join(sorted(successful_modes)),
+                    ",".join(failures),
+                )
+                return True
+            raise RuntimeError(f"All triggered modes failed | {failed_summary}")
+
+        self.logger.info(
+            "Processing completed | modes=%s | sources=%s",
+            ",".join(sorted(successful_modes)),
+            ",".join(committed),
+        )
         return True
 
     def run_forever(self) -> None:
@@ -396,7 +473,7 @@ class SynologyMonitor:
                 self.run_cycle()
             except Exception as exc:
                 self.logger.warning(
-                    "Monitor cycle failed; state was not changed and the next cycle will retry | %s",
+                    "Monitor cycle failed; uncommitted changes will retry next cycle | %s",
                     exc,
                 )
                 self.logger.debug("Monitor cycle failure details", exc_info=True)
